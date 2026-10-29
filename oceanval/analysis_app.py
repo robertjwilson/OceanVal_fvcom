@@ -70,12 +70,11 @@ LABELS = {
     "transects": "transects",
 }
 
-# what the window says of what Analyze cannot yet work out of raw FVCOM output
-FVCOM_NOT_YET = "not yet available for FVCOM output."
+# what the window says of raw FVCOM output
 FVCOM_NOTE = (
     "This is raw FVCOM output, mapped on its own mesh: the cell thickness of the water column is worked out from "
-    "the sigma levels (siglev), h and zeta, and the spatial means are weighted by the areas of the mesh's cells. "
-    "Transects are " + FVCOM_NOT_YET
+    "the sigma levels (siglev), h and zeta, the spatial means are weighted by the areas of the mesh's cells, and "
+    "transects are interpolated from the mesh."
 )
 
 
@@ -239,7 +238,7 @@ class AnalyzeSteps:
                     picker=picker,
                     presets=preset_names,
                     ersem=ersem,
-                    # raw FVCOM output: only a climatology can be worked out of it so far
+                    # raw FVCOM output, worked out on its own mesh
                     fvcom=any(stream.get("fvcom") for stream in found),
                 )
                 if not self._analyze_missing_set:
@@ -566,7 +565,7 @@ class AnalyzeSteps:
         if kind == "transects":
             available = (self.analyze_found or {}).get("picker", {}).get("available", [])
             chosen, errors = analysis_forms.check_transects(
-                form, placed, self._known_years(found), set(available), self.cwd
+                form, placed, self._known_years(found), set(available), self.cwd, fvcom=self._analyze_fvcom()
             )
             return (None, errors) if errors else (chosen, {})
         chosen, errors = analysis_forms.check_phenology(
@@ -580,15 +579,6 @@ class AnalyzeSteps:
         """Whether the simulation Analyze is working on is raw FVCOM output.
         Called with the lock held."""
         return self.action != SIMCOMPARE and bool((self.analyze_found or {}).get("fvcom"))
-
-    def _fvcom_errors(self, kind, chosen):
-        """The errors of a pop-out whose choices Analyze cannot yet work out
-        of raw FVCOM output: the transects (see analysis.FVCOM_TEXT). Called
-        with the lock held."""
-        if not self._analyze_fvcom() or kind not in analysis.FVCOM_TEXT:
-            return {}
-        verb = "is" if kind == "phenology" else "are"
-        return {"rows": f"{LABELS[kind][0].upper()}{LABELS[kind][1:]} {verb} {FVCOM_NOT_YET}"}
 
     def analyze_option(self, kind, form):
         """A pop-out's Confirm, with its boxes. The time series' also hold the
@@ -642,8 +632,6 @@ class AnalyzeSteps:
             else:
                 clean = analysis_forms.clean_phenology(form, placed)
             chosen, errors = self._check_option(kind, clean)
-            if not errors:
-                errors = self._fvcom_errors(kind, chosen)
             area = None
             if kind in ("long_term", "seasonal") and isinstance(form, dict):
                 area = analysis_forms.clean_area({**(form.get("area") or {}), "stations": form.get("stations")})
@@ -673,13 +661,6 @@ class AnalyzeSteps:
             if self.view != "analyze_options":
                 return 409, {"ok": False, "error": "This step is over."}
             chosen = self.analyze_chosen
-            for kind in KINDS:
-                if chosen[kind] and self._fvcom_errors(kind, chosen[kind]):
-                    return 400, {
-                        "ok": False,
-                        "error": f"The {LABELS[kind]} {'is' if kind == 'phenology' else 'are'} {FVCOM_NOT_YET} "
-                        f"Remove the {LABELS[kind]}.",
-                    }
             if not any(chosen[kind] for kind in KINDS):
                 return 400, {
                     "ok": False,
@@ -887,7 +868,7 @@ class AnalyzeSteps:
             "missing_probed": self.analyze_missing_probed,
             "figure_code": self.analyze_figure_code,
             "nemo_ersem": bool((found or {}).get("ersem")),
-            # raw FVCOM output, of which only the climatology can be worked out so far
+            # raw FVCOM output, worked out on its own mesh, which needs no cell thickness
             "fvcom": self._analyze_fvcom(),
             "fvcom_note": FVCOM_NOTE,
             "daily": time_resolution.DAILY,

@@ -630,11 +630,13 @@ def clean_transects(form, placed):
     return {"rows": rows, "thickness": str(form.get("thickness") or "").strip()}
 
 
-def check_transects(form, placed, known_years, available=(), cwd="."):
+def check_transects(form, placed, known_years, available=(), cwd=".", fvcom=False):
     """Check the transects pop-out's boxes (see clean_transects).
     known_years(name) is the first and last years of a variable's output, or
     None; available the model's variable names, which the cell thickness, which
-    a vertical transect needs, can be one of. Returns (chosen, errors): chosen
+    a vertical transect needs, can be one of. fvcom: the output is raw FVCOM
+    output, whose layers' thickness analyze() works out from its mesh, so none
+    is asked for. Returns (chosen, errors): chosen
     is {"rows": {name: [transect, ...]}, "thickness"}, the variables ticked with
     their transects as analyze() takes them, and the thickness (None if no
     transect is vertical). errors
@@ -730,7 +732,7 @@ def check_transects(form, placed, known_years, available=(), cwd="."):
     if not chosen and not errors:
         errors["rows"] = "Tick at least one variable to work out transects of."
     thickness = None
-    if any(line["vertical"] or line["vertical_trends"] for lines in chosen.values() for line in lines):
+    if not fvcom and any(line["vertical"] or line["vertical_trends"] for lines in chosen.values() for line in lines):
         thickness = check_thickness(form["thickness"], set(available), cwd, errors)
     if errors:
         return None, errors

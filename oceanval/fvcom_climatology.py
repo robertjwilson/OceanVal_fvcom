@@ -28,7 +28,9 @@ are read one at a time (monthly_means), so no more than a year of months is
 held at once. The monthly means are also those the long-term and seasonal
 series are of (see oceanval.analysis_series and oceanval.mesh_means), and the
 daily climatology of the phenology is worked out in the same way, by day
-(daily_climatology).
+(daily_climatology). The transects (see oceanval.fvcom_transects) take the
+monthly means of only the cells along their lines (pick), at the surface or
+of every sigma layer (LEVELS), and the mean depth of the water (DEPTH).
 
 The files can be shared out to `cores` processes, each running this file as a
 script by its path (python -I), as it imports nothing of OceanVal: a spawned
@@ -59,6 +61,11 @@ BOTTOM = "bottom"
 MEAN = "mean"
 INTEGRAL = "integral"
 LAYERS = (SURFACE, BOTTOM, MEAN, INTEGRAL)
+# what a vertical transect needs (see oceanval.fvcom_transects): every sigma layer
+# as it is, and the depth of the water, h + zeta
+LEVELS = "levels"
+DEPTH = "depth"
+READ_LAYERS = LAYERS + (LEVELS, DEPTH)
 # the mesh, as the results files keep it, so a map can be drawn of them alone
 MESH = ("lon", "lat", "lonc", "latc", "x", "y", "nv")
 # the most values read at once, from one variable
@@ -311,23 +318,36 @@ def _column(handle, parts, start, stop, as_missing, layer, where, shares, h):
         return np.where(depth > 0, total / np.where(depth > 0, depth, 1.0), np.nan)
 
 
-def file_sums(path, parts, years, time_shift=None, as_missing=None, layer=SURFACE, by=MONTH, cells=None):
-    """The sums of the values of the sum of parts in layer (one of LAYERS)
-    in one FVCOM file, and how many there are, in each month of years
-    ([first, last]): {(year, month): (sums, counts)}, each an array with a
-    value for each cell. A cell missing in any part is missing in the sum, as
+def file_sums(path, parts, years, time_shift=None, as_missing=None, layer=SURFACE, by=MONTH, cells=None, pick=None):
+    """The sums of the values of the sum of parts in layer (one of
+    READ_LAYERS) in one FVCOM file, and how many there are, in each month of
+    years ([first, last]): {(year, month): (sums, counts)}, each an array with
+    a value for each cell. A cell missing in any part is missing in the sum, as
     CDO sums. by DAY takes them over each day instead, {(year, month, day):
     ...}. cells ([first, last + 1], the surface only) reads only those
-    cells."""
+    cells, and pick (the numbers of the cells, in order) only those cells.
+    LEVELS has a value for each sigma layer of each cell, layer by layer
+    (layers x cells, flattened), and DEPTH is the depth of the water, h +
+    zeta (parts are not read)."""
     import netCDF4
 
-    if layer not in LAYERS:
-        raise ValueError(f"layer must be one of {', '.join(LAYERS)}, not {layer}.")
+    if layer not in READ_LAYERS:
+        raise ValueError(f"layer must be one of {', '.join(READ_LAYERS)}, not {layer}.")
     if by not in (MONTH, DAY):
         raise ValueError(f"by must be {MONTH} or {DAY}, not {by}.")
     if cells is not None and layer != SURFACE:
         raise ValueError("Only the surface can be read a band of cells at a time.")
+    if cells is not None and pick is not None:
+        raise ValueError("Give cells or pick, not both.")
     band = None if cells is None else slice(int(cells[0]), int(cells[1]))
+    chosen = None
+    if pick is not None:
+        pick = np.asarray(pick, dtype="int64")
+        if pick.size == 0 or np.any(np.diff(pick) <= 0):
+            raise ValueError("pick must be the numbers of one or more cells, in order.")
+        # the cells from the first picked to the last are read, and the picked kept
+        band = slice(int(pick[0]), int(pick[-1]) + 1)
+        chosen = pick - pick[0]
     found = {}
     with netCDF4.Dataset(path) as handle:
         dates = _times(handle, time_shift)
@@ -337,16 +357,24 @@ def file_sums(path, parts, years, time_shift=None, as_missing=None, layer=SURFAC
         first = handle.variables[parts[0]]
         where = NODE if NODE in first.dimensions else NELE
         cells = int(np.prod([len(handle.dimensions[dim]) for dim in first.dimensions if dim in (NODE, NELE)]))
-        if band is not None:
-            cells = len(range(cells)[band])
-        read = 1
-        if layer in (MEAN, INTEGRAL):
+        if layer == DEPTH:
+            h = _needed(handle, "h", path)
+            # zeta is read on every node
+            cells, read = h.size, 2
+        else:
+            if band is not None:
+                cells = len(range(cells)[band])
+            read = 1
+        if layer in (MEAN, INTEGRAL, LEVELS):
             bad = [name for name in parts if SIGLAY not in handle.variables[name].dimensions]
             if bad:
                 raise ValueError(
                     f"{', '.join(bad)} {'is' if len(bad) == 1 else 'are'} not on the sigma layers (siglay) of the "
-                    "FVCOM mesh, so there is no water column to take."
+                    "FVCOM mesh, so there is no "
+                    + ("water column to take." if layer != LEVELS else "section through the water column to take.")
                 )
+            read = len(handle.dimensions[SIGLAY])
+        if layer in (MEAN, INTEGRAL):
             shares = _shares(handle, where, path)
             h = _needed(handle, "h", path)
             # the layers of a block at once, and their thicknesses
@@ -359,12 +387,20 @@ def file_sums(path, parts, years, time_shift=None, as_missing=None, layer=SURFAC
                 continue
             if layer == SURFACE:
                 values = _summed(handle, parts, start, stop, as_missing, 0, band)
+            elif layer == LEVELS:
+                values = _summed(handle, parts, start, stop, as_missing, None, band)
+            elif layer == DEPTH:
+                values = _depth_of_water(handle, where, start, stop, h)
+                if band is not None:
+                    values = values[..., band]
             elif layer == BOTTOM:
                 values = _bottom(handle, parts, start, stop, as_missing)
             else:
                 values = _column(handle, parts, start, stop, as_missing, layer, where, shares, h)
+            if chosen is not None:
+                values = values[..., chosen]
             for i in wanted:
-                row = values[i - start]
+                row = values[i - start].reshape(-1)
                 sums, counts = found.setdefault(months[i], (np.zeros(row.size), np.zeros(row.size, dtype="int64")))
                 ok = np.isfinite(row)
                 sums[ok] += row[ok]
@@ -383,10 +419,10 @@ def _add(total, found):
 
 def _run_jobs(jobs, out_dir):
     """Work out the file_sums of each of jobs ([path, parts, years,
-    time_shift, as_missing, layer, by, cells]), saving each as
+    time_shift, as_missing, layer, by, cells, pick]), saving each as
     out_dir/<n>.npz: the script each worker process runs."""
-    for number, (path, parts, years, time_shift, as_missing, layer, by, cells) in jobs:
-        found = file_sums(path, parts, years, time_shift, as_missing, layer, by, cells)
+    for number, (path, parts, years, time_shift, as_missing, layer, by, cells, pick) in jobs:
+        found = file_sums(path, parts, years, time_shift, as_missing, layer, by, cells, pick)
         arrays = {}
         for key, (sums, counts) in found.items():
             name = "_".join(str(x) for x in key)
@@ -406,7 +442,7 @@ def _read_saved(path):
 
 
 def monthly_sums(files, parts, years, time_shift=None, as_missing=None, cores=1, layer=SURFACE, by=MONTH,
-                 cells=None):
+                 cells=None, pick=None):
     """The file_sums of every one of files in layer, added: {(year, month):
     (sums, counts)} (or by day, see file_sums). With cores > 1 the files are
     shared out to that many processes running this file as a script."""
@@ -414,11 +450,12 @@ def monthly_sums(files, parts, years, time_shift=None, as_missing=None, cores=1,
     workers = max(1, min(int(cores), len(files)))
     if workers == 1:
         for path in files:
-            _add(total, file_sums(path, parts, years, time_shift, as_missing, layer, by, cells))
+            _add(total, file_sums(path, parts, years, time_shift, as_missing, layer, by, cells, pick))
         return total
     cells = None if cells is None else [int(cells[0]), int(cells[1])]
+    pick = None if pick is None else [int(cell) for cell in pick]
     jobs = [
-        [number, [path, list(parts), list(years), time_shift, as_missing, layer, by, cells]]
+        [number, [path, list(parts), list(years), time_shift, as_missing, layer, by, cells, pick]]
         for number, path in enumerate(files)
     ]
     with tempfile.TemporaryDirectory(prefix="oceanval_fvcom_") as out_dir:
@@ -501,14 +538,16 @@ def years_of(file_years, years):
     ]
 
 
-def monthly_means(files, parts, years, time_shift=None, as_missing=None, cores=1, layer=SURFACE, file_years=None):
+def monthly_means(files, parts, years, time_shift=None, as_missing=None, cores=1, layer=SURFACE, file_years=None,
+                  pick=None):
     """The mean of each month of each year in layer of the sum of parts in the
     FVCOM files, over years ([first, last]), in order: yields ((year, month),
     array of a value for each cell, NaN where there is none). With file_years
     ({path: the years of its times}, as analyze() reads them) a year is read at
-    a time, from only its files, so no more than a year of months is held."""
+    a time, from only its files, so no more than a year of months is held.
+    pick: only those cells (see file_sums)."""
     if file_years is None:
-        total = monthly_sums(files, parts, years, time_shift, as_missing, cores, layer)
+        total = monthly_sums(files, parts, years, time_shift, as_missing, cores, layer, pick=pick)
         for key in sorted(total):
             yield key, _mean(*total[key])
         return
@@ -516,7 +555,7 @@ def monthly_means(files, parts, years, time_shift=None, as_missing=None, cores=1
     for year, chosen in years_of(file_years, years):
         if not chosen:
             continue
-        total = monthly_sums(chosen, parts, [year, year], time_shift, as_missing, cores, layer)
+        total = monthly_sums(chosen, parts, [year, year], time_shift, as_missing, cores, layer, pick=pick)
         for key in sorted(total):
             yield key, _mean(*total[key])
 

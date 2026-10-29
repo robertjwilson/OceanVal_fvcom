@@ -1406,6 +1406,14 @@ def _n_depths():
     return N_DEPTHS
 
 
+def _depth_source(saved):
+    """What the depths of the cells of a section are worked out from."""
+    if saved["depths"] == "sigma":
+        # raw FVCOM output (see oceanval.fvcom_transects)
+        return "the mean depth of the water (h + zeta) and each sigma layer's share of it (from siglev)"
+    return "the cell thickness"
+
+
 def transect_text(variable, index, option):
     """What the report says of one option of one transect of a variable's entry
     in what analyze() saved: {"title", "method", "caption"}."""
@@ -1426,9 +1434,9 @@ def transect_text(variable, index, option):
         thing, at = name, "at each point along the transect and at each of the depths shown"
         in_section = " in the water column"
         depths = (
-            f" Each cell is put at its depth, worked out from the cell thickness, and the section is put on {_n_depths()} evenly spaced depths, "
+            f" Each cell is put at its depth, worked out from {_depth_source(saved)}, and the section is put on {_n_depths()} evenly spaced depths, "
             "of which the heat maps show some."
-            if saved["depths"] == "thickness"
+            if saved["depths"] in ("thickness", "sigma")
             else " The heat maps show some of the model's depths."
         )
     else:
@@ -1452,8 +1460,8 @@ def transect_text(variable, index, option):
             f"The annual mean of {name} is the mean of its monthly means over {years}, at each point along the transect and each depth, "
             "in a section through the water column."
             + (
-                f" Each cell is put at its depth, worked out from the cell thickness, and the section is put on {_n_depths()} evenly spaced depths."
-                if saved["depths"] == "thickness"
+                f" Each cell is put at its depth, worked out from {_depth_source(saved)}, and the section is put on {_n_depths()} evenly spaced depths."
+                if saved["depths"] in ("thickness", "sigma")
                 else ""
             )
         )

@@ -962,9 +962,6 @@
   .analyze-files .review__head { padding-bottom: 4px; }
   .analyze-options.choices.is-two { max-width: 980px; gap: 28px; }
   .analyze-options .choice { aspect-ratio: auto; min-height: 200px; padding-top: 30px; }
-  /* an analysis not yet available for the simulation's output (raw FVCOM's: see analysis_app.FVCOM_NOTE) */
-  .analyze-options .choice:disabled { cursor: not-allowed; opacity: 0.55; box-shadow: none; transform: none; border-style: dashed; }
-  .analyze-options .choice:disabled:hover { border-color: var(--line); box-shadow: none; transform: none; }
   .analyze-area { max-width: 980px; margin: 28px 0 0; }
   .analyze-area .s-select { width: auto; min-width: 280px; }
   .analyze-area .group__line.is-ersem, .missing-field .group__line.is-ersem, #setup-missing .group__line.is-ersem { color: var(--ersem); font-weight: 600; }
@@ -2491,6 +2488,7 @@
         <datalist id="trans-thickness-options"></datalist>
         <p class="analyze-dialog__intro">A vertical section needs to know where each cell is. With <code>z_level</code> the model's levels are the depths. With a thickness, each cell is placed at its depth, from the top of the water column, and the section is put on evenly spaced depths.</p>
       </div>
+      <p class="analyze-dialog__intro" id="trans-fvcom-thickness" hidden>For FVCOM output each sigma layer of a vertical section is placed at its depth from its share of the sigma levels (<code>siglev</code>) of the mean depth of the water (<code>h</code> + <code>zeta</code>), so no thickness is needed.</p>
       <div class="transect-vars" id="trans-body"></div>
     </div>
     <div class="picker__foot">
@@ -5475,10 +5473,6 @@
   const CHANGE_KINDS = { absolute: "Absolute change", percentage: "Percentage change" };
   const analyzeDialog = { kind: null, opener: null, rows: {}, thickness: null, stations: [] };
 
-  // what Analyze cannot yet work out of raw FVCOM output (see analysis_app.FVCOM_NOT_YET): the transects
-  const FVCOM_NOT_YET = "Not yet available for FVCOM output";
-  const fvcomNotYet = (kind) => Boolean(state.analyze.fvcom) && kind === "transects";
-
   function yearSpan(start, end) {
     return String(start) === String(end) ? String(start) : `${start}–${end}`;
   }
@@ -5509,21 +5503,12 @@
     $("ao-page-2").hidden = analyzePage.number !== 2;
     $("ao-page-3").hidden = analyzePage.number !== 3;
     $("ao-compare-note").hidden = state.action !== "simcompare";
-    // raw FVCOM output: everything but the transects can be worked out of it
+    // raw FVCOM output, worked out on its own mesh
     $("ao-fvcom-note").hidden = !state.analyze.fvcom;
     $("ao-fvcom-note").textContent = state.analyze.fvcom ? state.analyze.fvcom_note : "";
     for (const kind of ANALYSES) {
       const tile = $(`ao-${kind}`);
       const chosen = Boolean(state.analyze.chosen[kind]);
-      const notYet = fvcomNotYet(kind);
-      tile.disabled = notYet;
-      if (notYet) {
-        tile.classList.remove("is-chosen");
-        tile.querySelector(".choice__tag").hidden = true;
-        tile.querySelector(".choice__remove").hidden = true;
-        $(`ao-${kind}-text`).textContent = FVCOM_NOT_YET;
-        continue;
-      }
       tile.classList.toggle("is-chosen", chosen);
       tile.querySelector(".choice__tag").hidden = !chosen;
       tile.querySelector(".choice__remove").hidden = !chosen;
@@ -6203,9 +6188,11 @@
 
   function refreshThickness() {
     if (analyzeDialog.kind === "transects") {
-      // a vertical section, of a variable that is ticked
+      // a vertical section, of a variable that is ticked: raw FVCOM output's layers are placed from its mesh
       const vertical = Object.values(analyzeDialog.rows).some((section) => section.use.checked && section.cards.some((card) => card.vertical.checked || card.vertical_trends.value));
-      $("trans-thickness-row").hidden = !vertical;
+      const fvcom = Boolean(state.analyze.fvcom);
+      $("trans-thickness-row").hidden = !vertical || fvcom;
+      $("trans-fvcom-thickness").hidden = !vertical || !fvcom;
       return;
     }
     const any = Object.values(analyzeDialog.rows).some((row) => row.use.checked && row.water && row.water.checked);

@@ -1260,28 +1260,6 @@ def _work_out(row, results_dir, thickness, thickness_for, time_shift, area=None,
     return entry
 
 
-# what Analyze cannot yet work out of raw FVCOM output: everything else is
-FVCOM_TEXT = {
-    "transects": "transects",
-}
-
-
-def fvcom_unsupported(row):
-    """What row (check_arguments's) asks for that Analyze cannot yet work
-    out of raw FVCOM output, as keys of FVCOM_TEXT: the transects."""
-    return [kind for kind in KINDS if kind in FVCOM_TEXT and row[kind]]
-
-
-def fvcom_text(unsupported):
-    """What a user is told of the analyses fvcom_unsupported finds."""
-    names = [FVCOM_TEXT[x] for x in unsupported]
-    listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
-    return (
-        f"this is raw FVCOM output, and {listed} are not yet available for "
-        "FVCOM output. Analyze can work out everything else of FVCOM output: leave out its transects."
-    )
-
-
 def check_mesh_area(rows, area):
     """Raise ValueError if the time series of a variable of raw FVCOM output
     whose mesh is in metres, with no longitudes and latitudes, are asked to be
@@ -1364,7 +1342,7 @@ def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_
     the files already read (see model_check.save_times_index), which are not
     read again if their files are unchanged. refuse_fvcom, if given, is the
     name of what refuses raw FVCOM output (as compare_simulations does), which
-    is otherwise worked out as fvcom_unsupported says. Raises ValueError saying
+    Analyze otherwise works out on its own mesh. Raises ValueError saying
     everything that is wrong."""
     from oceanval import time_stamps
     from oceanval.matchall import index_times
@@ -1379,7 +1357,7 @@ def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_
         )
     if refuse_fvcom and found[0].get("fvcom"):
         raise ValueError(f"{refuse_fvcom} does not work with FVCOM output yet.")
-    # raw FVCOM output, whose mesh CDO cannot read, by its files (see fvcom_unsupported)
+    # raw FVCOM output, whose mesh CDO cannot read, by its files
     fvcom_files = {tuple(stream["files"]): bool(stream.get("fvcom")) for stream in found}
 
     # the time resolution of a stream is read from some of its files: once for each
@@ -1403,9 +1381,6 @@ def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_
         row.update(describe_variable(row["model_variable"], stream))
         row["fvcom"] = bool(stream.get("fvcom"))
         if row["fvcom"]:
-            unsupported = fvcom_unsupported(row)
-            if unsupported:
-                problems.append(f"{row['name']} ({row['model_variable']}): {fvcom_text(unsupported)}")
             from oceanval import fvcom_climatology
 
             try:
@@ -1425,6 +1400,23 @@ def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_
                     f"sigma layers (siglay) of the FVCOM mesh, and {', '.join(bad)} {'is' if len(bad) == 1 else 'are'} "
                     "not (on the sigma levels, siglev, the tops and bottoms of the layers, or with no vertical "
                     "levels), so its water column is not yet available: leave out its water_column."
+                )
+            vertical_transect = row["transects"] and any(
+                line["vertical"] or line["vertical_trends"] for line in row["transects"]["lines"]
+            )
+            bad = fvcom_climatology.not_layered(stream["files"][0], row["parts"]) if vertical_transect else []
+            if bad and row["levels"] > 1:
+                problems.append(
+                    f"{row['name']} ({row['model_variable']}): a section through the water column needs every part of it "
+                    f"on the sigma layers (siglay) of the FVCOM mesh, and {', '.join(bad)} {'is' if len(bad) == 1 else 'are'} "
+                    "not (on the sigma levels, siglev, the tops and bottoms of the layers, or with no vertical levels): "
+                    "leave out the vertical climatology and vertical changes of its transects."
+                )
+            if row["transects"] and not fvcom_climatology.has_lon_lat(stream["files"][0]):
+                # the transects' ends are longitudes and latitudes (see oceanval.fvcom_transects)
+                problems.append(
+                    f"{row['name']} ({row['model_variable']}): the FVCOM mesh is in metres, with no longitudes and "
+                    "latitudes, so it has no transects: leave out its transects."
                 )
             # read with netCDF4, a layer of each part at a time (see oceanval.fvcom_climatology)
             row["surface_fast"] = row["surface_small_cache"] = False

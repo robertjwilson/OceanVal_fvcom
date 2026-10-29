@@ -138,7 +138,7 @@ def analyses(tmp_path_factory):
                              "plot": "absolute_changes", "change": "absolute", "surface": True}},
     )
     # raw FVCOM output, on the nodes and on the elements, mapped on its mesh: its climatology at the surface,
-    # the bottom and through the water column, its phenology, series (with a station) and map changes
+    # the bottom and through the water column, its phenology, series (with a station), map changes and transects
     fvcom = fvcom_months(str(root / "fvcom_sim"))
     fvcom_years = {"start": 2012, "end": 2013}
     runs["fvcom"] = dict(
@@ -153,6 +153,11 @@ def analyses(tmp_path_factory):
         stations={"Middle": [-4.52, 50.31]},
         map_changes={"Temperature": {"historical": {"start": 2012, "end": 2012}, "future": [{"start": 2013, "end": 2013}],
                                      "plot": "absolute_changes", "change": "absolute", "surface": True}},
+        # interpolated from the mesh: at the surface and through the water column, on the nodes and the elements
+        transects={
+            "Temperature": [{"start": [-5.0, 50.25], "end": [-4.0, 50.25], "climatology": fvcom_years, "vertical": fvcom_years}],
+            "Velocity": [{"start": [-4.47, 50.0], "end": [-4.47, 51.0], "climatology": fvcom_years}],
+        },
     )
     found = {}
     with pytest.MonkeyPatch.context() as patch:

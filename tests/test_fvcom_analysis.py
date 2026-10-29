@@ -2,8 +2,9 @@
 oceanval.mesh_means and oceanval.mesh_maps): the climatology (at the surface,
 the bottom and through the water column), the phenology, the long-term and
 seasonal series and the map changes are worked out on the mesh itself, the
-spatial means weighted by the areas of its cells; the transects are refused,
-by analyze() and by the window."""
+spatial means weighted by the areas of its cells, and the transects are
+interpolated from the mesh onto a strip along each line, which nctoolkit's
+to_transect extracts them from (see oceanval.fvcom_transects)."""
 
 import ast
 import datetime
@@ -18,7 +19,9 @@ import pytest  # noqa: E402
 import xarray as xr  # noqa: E402
 
 import oceanval  # noqa: E402
-from oceanval import analysis, analysis_forms, fvcom_climatology, mesh_maps, mesh_means, missing_probe  # noqa: E402
+from oceanval import (  # noqa: E402
+    analysis, analysis_forms, fvcom_climatology, fvcom_transects, mesh_maps, mesh_means, missing_probe,
+)
 from oceanval.app import App  # noqa: E402
 from test_app import get_json, leftover_dir, post, wait_for  # noqa: E402, F401 (leftover_dir is autouse)
 from viewer_simulations import fvcom_file, fvcom_mesh, fvcom_months, fvcom_simulation  # noqa: E402
@@ -577,26 +580,182 @@ class TestMapChanges:
         assert percent["map_changes"]["layers"]["integral"]["units"] == "degrees_C m"
 
 
-class TestTransectsAreRefused:
-    def test_analyze_says_what_is_not_yet_available(self, fvcom_sim, tmp_path, no_report):
-        years = {"start": 2012, "end": 2012}
-        with pytest.raises(ValueError) as raised:
-            analyze(
-                fvcom_sim, tmp_path / "out",
-                climatology={"Temperature": dict(years, surface=True, bottom=True, water_column="mean")},
-                phenology={"Temperature": years},
-                long_term={"Temperature": dict(years, surface=True)},
-                seasonal={"Temperature": dict(years, surface=True)},
-                map_changes={"Temperature": {"historical": years, "future": [{"start": 2013, "end": 2013}],
-                                             "plot": "absolute", "change": "absolute", "surface": True}},
-                transects={"Temperature": [{"start": [-5.0, 50.5], "end": [-4.0, 50.5], "climatology": years}]},
-            )
-        text = str(raised.value)
-        assert "transects are not yet available for FVCOM output" in text and "leave out its transects" in text
-        for what in ("phenology", "long-term", "seasonal", "map temporal changes"):
-            assert what not in text
-        assert not os.path.exists(os.path.join(str(tmp_path / "out"), analysis.FOLDER))
+def analyzed(built, sim, out, **arguments):
+    """analyze(), and the info it saved (built is no_report)."""
+    analyze(sim, out, **arguments)
+    return built[-1]
 
+
+def transect_csv(out, key, number, option):
+    import pandas as pd
+
+    return pd.read_csv(os.path.join(results_of(out), f"{key}_transect_{number}_{option}.csv"))
+
+
+def inside_mesh(lons, lats):
+    """Which of the points are inside the mesh of fvcom_mesh, and the element (from 0) each is in."""
+    from matplotlib.tri import Triangulation
+
+    lon, lat, nv = fvcom_mesh()
+    found = Triangulation(lon, lat, nv.T - 1).get_trifinder()(np.asarray(lons, float), np.asarray(lats, float))
+    return found >= 0, found
+
+
+def elements_at(lon, lat):
+    """The elements (from 0) of fvcom_mesh the point is in, or on a side or corner of."""
+    mesh_lon, mesh_lat, nv = fvcom_mesh()
+    x, y = mesh_lon[nv - 1], mesh_lat[nv - 1]
+    det = (y[1] - y[2]) * (x[0] - x[2]) + (x[2] - x[1]) * (y[0] - y[2])
+    first = ((y[1] - y[2]) * (lon - x[2]) + (x[2] - x[1]) * (lat - y[2])) / det
+    second = ((y[2] - y[0]) * (lon - x[2]) + (x[0] - x[2]) * (lat - y[2])) / det
+    near = -1e-9
+    return set(np.flatnonzero((first >= near) & (second >= near) & (1 - first - second >= near)).tolist())
+
+
+def water_depth(lon):
+    """The depth of the water of fvcom_file: h + zeta."""
+    return 20 + 200 * (lon + 5) + 0.5
+
+
+class TestWeights:
+    def mesh(self):
+        from oceanval.viewer_mesh import Mesh
+
+        lon, lat, nv = fvcom_mesh()
+        return Mesh(lon, lat, nv.T - 1)
+
+    def test_a_value_on_the_nodes_is_linear_within_its_triangle(self):
+        mesh = self.mesh()
+        lons, lats = np.array([-5.0, -4.93, -4.5, -3.5]), np.array([50.0, 50.07, 50.55, 50.5])
+        cells, weights = fvcom_transects.weights(mesh, "node", lons, lats)
+        # a linear field is interpolated exactly
+        field = 3 * mesh.x - 2 * mesh.y
+        values = fvcom_transects.interpolate(field, cells, weights)
+        assert np.allclose(values[:3], 3 * lons[:3] - 2 * lats[:3]) and np.isnan(values[3])
+        # at a node, all of the weight is on it
+        assert np.isclose(np.nanmax(weights[0]), 1)
+        # a missing value at one corner leaves out the triangles it is a corner of
+        field[cells[1, 0]] = np.nan
+        assert np.isnan(fvcom_transects.interpolate(field, cells, weights)[1])
+
+    def test_a_value_on_the_elements_fills_its_triangle(self):
+        mesh = self.mesh()
+        lons, lats = np.array([-4.93, -4.47, -3.5]), np.array([50.02, 50.31, 50.5])
+        cells, weights = fvcom_transects.weights(mesh, "nele", lons, lats)
+        values = fvcom_transects.interpolate(np.arange(mesh.elements, dtype=float), cells, weights)
+        _, found = inside_mesh(lons, lats)
+        assert values[:2].tolist() == found[:2].tolist() and np.isnan(values[2])
+
+    def test_the_strip_holds_each_point_in_a_cell_of_its_own(self):
+        line = {"start": [-4.5, 50.9], "end": [-4.5, 50.1]}
+        lons, lats, (point_lons, point_lats) = fvcom_transects.strip(line, 9)
+        assert len(lons) == 2 and np.allclose(lons.mean(), -4.5)
+        # two rows round each point, in order from the south
+        assert np.allclose(point_lats, np.linspace(50.1, 50.9, 9)) and np.allclose(point_lons, -4.5)
+        assert np.allclose(lats.reshape(-1, 2).mean(axis=1), point_lats) and np.all(np.diff(lats) > 0)
+
+
+class TestTransects:
+    def test_the_surface_climatology_along_a_line(self, fvcom_sim, tmp_path, no_report):
+        # an east-west line that runs off the mesh at both ends
+        years = {"start": 2012, "end": 2013}
+        info = analyzed(no_report, fvcom_sim, tmp_path / "out", climatology=None, transects={"Temperature": [
+            {"start": [-5.2, 50.25], "end": [-3.8, 50.25], "climatology": years}]})
+        line = info["variables"][0]["transects"]["lines"][0]
+        assert info["variables"][0]["transects"]["mesh"] == "node" and line["steps"] > 2
+        saved = line["options"]["climatology"]
+        assert saved["months"] == 4 and not saved["empty"]
+        frame = transect_csv(tmp_path / "out", "temperature", 1, "climatology")
+        positions = np.linspace(-5.2, -3.8, line["steps"])
+        assert np.allclose(np.sort(frame.position.unique()), positions)
+        inside, _ = inside_mesh(positions, np.full(positions.size, 50.25))
+        months, climatology, _ = expected_temperature(positions)
+        for number, month in enumerate(months):
+            values = frame[frame.month == month].sort_values("position").value.to_numpy()
+            # 10 + lon + the day is linear on the mesh, so it is interpolated exactly
+            assert np.allclose(values[inside], climatology[number][inside], rtol=1e-6)
+            assert np.isnan(values[~inside]).all()
+
+    def test_the_section_through_the_water_column(self, fvcom_sim, tmp_path, no_report):
+        years = {"start": 2012, "end": 2013}
+        info = analyzed(no_report, fvcom_sim, tmp_path / "out", climatology=None, transects={"Temperature": [
+            {"start": [-5.0, 50.25], "end": [-4.0, 50.25], "vertical": years}]})
+        saved = info["variables"][0]["transects"]["lines"][0]["options"]["vertical"]
+        assert saved["depths"] == "sigma" and not saved["empty"]
+        frame = transect_csv(tmp_path / "out", "temperature", 1, "vertical").dropna()
+        _, _, annual = expected_temperature(frame.position.to_numpy())
+        depth = water_depth(frame.position.to_numpy())
+        # temp is the surface's + the layer, and layer k's middle is (k + 0.5) / 5 of the depth of the water,
+        # so between the middles of the top and bottom layers it is the surface's + 5 x depth / water - 0.5
+        assert np.allclose(frame.value, annual + 5 * frame.depth / depth - 0.5, rtol=1e-5)
+        assert np.isclose(frame.depth.min(), 0.1 * water_depth(-5.0), rtol=1e-4)
+        assert np.isclose(frame.depth.max(), 0.9 * water_depth(-4.0), rtol=1e-3)
+
+    def test_values_on_the_elements(self, fvcom_sim, tmp_path, no_report):
+        years = {"start": 2012, "end": 2012}
+        info = analyzed(no_report, fvcom_sim, tmp_path / "out", variables={"Velocity": "u"}, climatology=None, transects={
+            "Velocity": [{"start": [-4.47, 50.0], "end": [-4.47, 51.0], "climatology": years}]})
+        line = info["variables"][0]["transects"]["lines"][0]
+        assert info["variables"][0]["transects"]["mesh"] == "nele"
+        frame = transect_csv(tmp_path / "out", "velocity", 1, "climatology")
+        january = frame[frame.month == 1].sort_values("position")
+        lats = np.linspace(50.0, 51.0, line["steps"])
+        inside, _ = inside_mesh(np.full(lats.size, -4.47), lats)
+        values = january.value.to_numpy()
+        # u is the number of the element, which fills its triangle (a point on a side is in either)
+        for lat, value in zip(lats[inside], values[inside]):
+            assert value in elements_at(-4.47, lat)
+        assert np.isnan(values[~inside]).all() and (~inside).any()
+
+    def test_the_changes_over_the_years(self, tmp_path, no_report):
+        sim = fvcom_months(str(tmp_path / "sim"), [(year, month) for year in (2012, 2013) for month in range(1, 13)])
+        years = {"start": 2012, "end": 2013}
+        info = analyzed(no_report, sim, tmp_path / "out", climatology=None, transects={"Temperature": [
+            {"start": [-5.0, 50.25], "end": [-4.0, 50.25], "trends": dict(years, how="absolute_change"),
+             "vertical_trends": dict(years, how="absolute")}]})
+        options = info["variables"][0]["transects"]["lines"][0]["options"]
+        assert options["trends"]["years"] == [2012, 2013] and options["trends"]["notes"] == []
+        surface = transect_csv(tmp_path / "out", "temperature", 1, "trends")
+        # each year's mean is the mean of its months' means, and 10 + lon + the day changes only by the days
+        change = np.mean([days_of(2013, m).mean() - days_of(2012, m).mean() for m in range(1, 13)])
+        later = surface[surface.year == 2013].dropna()
+        assert len(later) and np.allclose(later.value, change, rtol=1e-5)
+        assert np.allclose(surface[surface.year == 2012].dropna().value, 0)
+        vertical = transect_csv(tmp_path / "out", "temperature", 1, "vertical_trends")
+        assert {"position", "depth", "year", "value"} <= set(vertical) and vertical.value.notna().any()
+        first = vertical[vertical.year == 2012].dropna()
+        annual = 10 + first.position + np.mean([days_of(2012, m).mean() for m in range(1, 13)])
+        assert np.allclose(first.value, annual + 5 * first.depth / water_depth(first.position) - 0.5, rtol=1e-5)
+
+    def test_more_cores_give_the_same(self, fvcom_sim, tmp_path, no_report):
+        years = {"start": 2012, "end": 2013}
+        lines = {"Temperature": [{"start": [-4.55, 50.0], "end": [-4.55, 51.0], "climatology": years, "vertical": years}]}
+        analyze(fvcom_sim, tmp_path / "one", climatology=None, transects=lines)
+        oceanval.analyze(sim_dir=fvcom_sim, n_dirs_down=1, cores=2, view=False, out_dir=str(tmp_path / "two"),
+                         variables={"Temperature": "temp"}, transects=lines)
+        for option in ("climatology", "vertical"):
+            one = transect_csv(tmp_path / "one", "temperature", 1, option)
+            two = transect_csv(tmp_path / "two", "temperature", 1, option)
+            assert np.allclose(one.value, two.value, equal_nan=True)
+
+    def test_what_has_no_section_is_refused(self, fvcom_sim, tmp_path, no_report):
+        years = {"start": 2012, "end": 2013}
+        with pytest.raises(ValueError, match="a section through the water column needs every part of it on the sigma layers"):
+            analyze(fvcom_sim, tmp_path / "out", variables={"Plus": "temp+zeta"}, climatology=None, transects={
+                "Plus": [{"start": [-5.0, 50.25], "end": [-4.0, 50.25], "vertical": years}]})
+        # the surface is fine
+        analyze(fvcom_sim, tmp_path / "out", variables={"Plus": "temp+zeta"}, climatology=None, transects={
+            "Plus": [{"start": [-5.0, 50.25], "end": [-4.0, 50.25], "climatology": years}]})
+
+    def test_a_mesh_in_metres_has_no_transects(self, tmp_path, no_report):
+        sim = fvcom_simulation(str(tmp_path / "sim"), cartesian=True)
+        with pytest.raises(ValueError, match="the FVCOM mesh is in metres, with no longitudes and latitudes, so it has no transects"):
+            oceanval.analyze(sim_dir=sim, n_dirs_down=0, cores=1, view=False, out_dir=str(tmp_path / "out"),
+                             variables={"Temperature": "temp"}, transects={"Temperature": [
+                                 {"start": [-5.0, 50.25], "end": [-4.0, 50.25], "climatology": {"start": 2012, "end": 2012}}]})
+
+
+class TestWhatIsRefused:
     def test_the_water_column_of_the_series_needs_the_sigma_layers(self, fvcom_sim, tmp_path, no_report):
         years = {"start": 2012, "end": 2013}
         with pytest.raises(ValueError, match="the water column needs every part of it on the sigma layers"):
@@ -691,19 +850,20 @@ def to_options(app):
 
 
 class TestWindow:
-    def test_everything_but_the_transects_can_be_chosen(self, app, fvcom_sim, monkeypatch):
+    def test_everything_can_be_chosen(self, app, fvcom_sim, monkeypatch):
         started = []
         monkeypatch.setattr(app, "start_run", lambda args, label: started.append(args))
         state = to_options(app)
-        assert state["fvcom"] is True and "Transects are not yet available for FVCOM output." in state["fvcom_note"]
+        assert state["fvcom"] is True and "transects are interpolated from the mesh" in state["fvcom_note"]
         # the dates are checked as matchup(fvcom=True) reads them
         assert app.analyze_check.request["fvcom"] is True and app.analyze_check.status == "done"
         years = {"use": True, "start": "2012", "end": "2013"}
+        # the transects, with a section through the water column and no thickness asked for
         line = dict(analysis_forms.blank_transect(), start_lon="-5", start_lat="50.5", end_lon="-4", end_lat="50.5",
-                    climatology=True, climatology_start="2012", climatology_end="2012")
-        status, reply = post(app, "/api/analyze_option", {"kind": "transects", "form": {
-            "rows": {"Temperature": {"use": True, "transects": [line]}}, "thickness": ""}})
-        assert status == 400 and "Transects are not yet available for FVCOM output." == reply["errors"]["rows"]
+                    climatology=True, climatology_start="2012", climatology_end="2012",
+                    vertical=True, vertical_start="2012", vertical_end="2013")
+        assert post(app, "/api/analyze_option", {"kind": "transects", "form": {
+            "rows": {"Temperature": {"use": True, "transects": [line]}}, "thickness": ""}}) == (200, {"ok": True})
         # the phenology, of daily output
         assert post(app, "/api/analyze_option", {"kind": "phenology", "form": {"rows": {"Temperature": years}}}) == (
             200, {"ok": True})
@@ -726,10 +886,11 @@ class TestWindow:
                                                         "water_column": "mean"}}
         assert given["phenology"] == {"Temperature": {"start": 2012, "end": 2013}}
         assert given["map_changes"]["Temperature"]["water_column"] == "integral"
+        assert given["transects"]["Temperature"][0]["vertical"] == {"start": 2012, "end": 2013}
         assert given["thickness"] is None and started
 
 
-def test_the_transects_are_greyed_out_in_a_browser(browser, tmp_path):
+def test_the_thickness_is_not_asked_for_in_a_browser(browser, tmp_path):
     fvcom_months(str(tmp_path / "fvcom_sim"), MONTHS[:2])
     app = App(cwd=str(tmp_path))
     url = app.start()
@@ -742,10 +903,9 @@ def test_the_transects_are_greyed_out_in_a_browser(browser, tmp_path):
         page.reload()
         page.wait_for_selector("#view-analyze-options:not([hidden])")
         assert page.is_visible("#ao-fvcom-note") and "FVCOM" in page.inner_text("#ao-fvcom-note")
-        for kind in ("climatology", "phenology", "long_term", "seasonal", "map_changes"):
+        for kind in ("climatology", "phenology", "long_term", "seasonal", "map_changes", "transects"):
             assert page.is_enabled(f"#ao-{kind}")
-        assert page.is_disabled("#ao-transects")
-        assert page.inner_text("#ao-transects-text") == "Not yet available for FVCOM output"
+        assert "Not yet available" not in page.inner_text("#view-analyze-options")
         page.click("#ao-climatology")
         page.wait_for_selector("#clim-dialog:not([hidden])")
         cells = page.locator("#clim-body tr").first.locator("td")
@@ -756,6 +916,17 @@ def test_the_transects_are_greyed_out_in_a_browser(browser, tmp_path):
         water.check()
         assert page.is_hidden("#clim-thickness-row") and page.is_visible("#clim-fvcom-thickness")
         assert "siglev" in page.inner_text("#clim-fvcom-thickness")
+        page.click("#clim-cancel")
+        page.wait_for_selector("#clim-dialog", state="hidden")
+        # a vertical transect does not ask for it either
+        page.click("#ao-transects")
+        page.wait_for_selector("#trans-dialog:not([hidden])")
+        card = page.locator("#trans-body .transect-card").first
+        card.locator("input[type=checkbox]").nth(1).check()
+        assert page.is_hidden("#trans-thickness-row") and page.is_visible("#trans-fvcom-thickness")
+        assert "siglev" in page.inner_text("#trans-fvcom-thickness")
+        card.locator("input[type=checkbox]").nth(1).uncheck()
+        assert page.is_hidden("#trans-fvcom-thickness")
         assert errors == []
     finally:
         app.close()

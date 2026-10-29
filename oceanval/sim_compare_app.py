@@ -178,7 +178,7 @@ class SimCompareSteps:
             found = analysis.streams(sim["simdir"], sim["ndown"], sim.get("exclude"), sim.get("require"), progress=progress)
             if not found:
                 error = "No netCDF files OceanVal could read were found."
-            elif analysis.looks_like_fvcom(found[0]["files"][0]):
+            elif found[0].get("fvcom"):
                 error = "Compare simulations does not work with FVCOM output yet."
             else:
                 picker = analysis_forms.picker_state(found)

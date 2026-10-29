@@ -11,7 +11,7 @@ Ocean model analysis and  validation made easy in Python.
 
 To learn more about the package, visit the [OceanVal website](https://PlymouthMarineLaboratory.github.io/OceanVal/). The
 
-OceanVal is designed for the automated analyis and validation of ocean models. You provide the model and validation data. OceanVal does the rest. It can also analyse a simulation on its own, with no observations: the climatology and the phenology of its variables, in an HTML report.
+OceanVal is designed for the automated analyis and validation of ocean models. You provide the model and validation data. OceanVal does the rest. It can also analyse a simulation on its own, with no observations: the climatology and the phenology of its variables, in an HTML report. For raw FVCOM output, so far only the climatology at the surface can be analysed, mapped on the FVCOM mesh itself.
 
 # Installation 
 

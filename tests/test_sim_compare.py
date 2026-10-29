@@ -151,7 +151,7 @@ class TestTimesAreReadOnce:
         from oceanval import analysis
 
         asked = []
-        monkeypatch.setattr(analysis, "stream_time_res", lambda files: asked.append(files))
+        monkeypatch.setattr(analysis, "stream_time_res", lambda files, fvcom=None: asked.append(files))
         rows = self.rows()
         analysis.locate_rows(rows, sims[0], 1, [], [], None)
         assert asked == [] and rows[0]["time_res"]
@@ -170,9 +170,9 @@ class TestTimesAreReadOnce:
         given_to = {}
         original = sim_compare.locate_rows
 
-        def spy(rows, sim_dir, *arguments):
+        def spy(rows, sim_dir, *arguments, **options):
             given_to[sim_dir] = arguments[-1]
-            return original(rows, sim_dir, *arguments)
+            return original(rows, sim_dir, *arguments, **options)
 
         monkeypatch.setattr(sim_compare, "locate_rows", spy)
         arguments = given(sims, out_dir=str(tmp_path))

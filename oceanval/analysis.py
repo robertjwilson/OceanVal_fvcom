@@ -395,9 +395,22 @@ def looks_like_fvcom(path):
 def _variables_of(path):
     """The variables of one file, {name: {"long_name", "units", "levels"}},
     as CDO reads them (so not coordinates or bounds), or as xarray reads its
-    data variables if CDO cannot read it. None if neither can."""
+    data variables if CDO cannot read it, None if neither can, and whether
+    it is raw FVCOM output (see looks_like_fvcom), whose variables are those
+    on its mesh (see fvcom_climatology.variables), as (variables, fvcom)."""
     with _FILE_READ_LOCK:
-        return _read_variables_of(path)
+        fvcom = _looks_like_fvcom(path)
+        if not fvcom:
+            return _read_variables_of(path), False
+        # CDO cannot read FVCOM's mesh, so nctoolkit's contents would leave its variables out
+        from oceanval import fvcom_climatology
+
+        try:
+            return fvcom_climatology.variables(path), True
+        except Exception:
+            return None, True
+        finally:
+            gc.collect()
 
 
 def _read_variables_of(path):
@@ -445,7 +458,7 @@ def streams(sim_dir, n_dirs_down, exclude=None, require=None, progress=None):
     each stream's first file, as
 
         [{"pattern", "files" (sorted paths), "variables": {name: {"long_name",
-          "units", "levels"}}}]
+          "units", "levels"}}, "fvcom": whether it is raw FVCOM output}]
 
     sorted by pattern. A stream whose first file cannot be read is left out.
     progress(done, total) is called as the streams are read."""
@@ -456,31 +469,39 @@ def streams(sim_dir, n_dirs_down, exclude=None, require=None, progress=None):
     for done, (pattern, files) in enumerate(sorted(grouped.items())):
         if progress is not None:
             progress(done, len(grouped))
-        variables = _variables_of(files[0])
+        variables, fvcom = _variables_of(files[0])
         if variables is None:
             continue
-        found.append({"pattern": pattern, "files": files, "variables": variables})
+        found.append({"pattern": pattern, "files": files, "variables": variables, "fvcom": fvcom})
     if progress is not None:
         progress(len(grouped), len(grouped))
     return found
 
 
-def _file_times(path):
+def _file_times(path, fvcom=False):
     """The year, month and day of each time in one file."""
+    if fvcom:
+        from oceanval.fvcom import fvcom_times
+
+        return fvcom_times(path)
     from oceanval.matchall import _file_times as times_of
 
     return times_of(path)
 
 
-def stream_time_res(files):
+def stream_time_res(files, fvcom=None):
     """The time resolution of a stream's files (see oceanval.time_res.label),
     from the times of its first files: one file with a single time says
-    nothing alone, so the next are read too, as matchup does."""
+    nothing alone, so the next are read too, as matchup does. fvcom: whether
+    the files are raw FVCOM output, whose times CDO cannot read (None: the
+    first file is looked at)."""
+    if fvcom is None:
+        fvcom = bool(files) and looks_like_fvcom(files[0])
     read = []
     frames = []
     for path in files[:6]:
         try:
-            times = _file_times(path)
+            times = _file_times(path, fvcom)
         except Exception:
             continue
         dates = list(zip(times.year, times.month, times.day))
@@ -1126,6 +1147,9 @@ def _work_out(row, results_dir, thickness, thickness_for, time_shift, area=None,
         layers = {}
         for layer in row["climatology"]["layers"]:
             _say(f"Working out the climatology of {row['name']}: {LAYER_TITLES[layer].lower()}")
+            if row.get("fvcom"):
+                layers[layer] = _fvcom_climatology(row, results_dir, layer, years, time_shift)
+                continue
             ds_thickness = None
             if layer in WATER_COLUMN:
                 if row["pattern"] not in thickness_for:
@@ -1208,6 +1232,71 @@ def _work_out(row, results_dir, thickness, thickness_for, time_shift, area=None,
     return entry
 
 
+# what Analyze can work out of raw FVCOM output so far: a climatology at the surface
+FVCOM_TEXT = {
+    "phenology": "phenology",
+    "long_term": "long-term time series",
+    "seasonal": "seasonal cycles",
+    "map_changes": "map temporal changes",
+    "transects": "transects",
+    BOTTOM: "the climatology at the bottom",
+    "mean": "the climatology's water column (vertical mean)",
+    "integral": "the climatology's water column (depth integral)",
+}
+
+
+def fvcom_unsupported(row):
+    """What row (check_arguments's) asks for that Analyze cannot yet work
+    out of raw FVCOM output, as keys of FVCOM_TEXT: everything but a
+    climatology at the surface."""
+    unsupported = [kind for kind in KINDS if kind != "climatology" and row[kind]]
+    if row["climatology"]:
+        unsupported += [layer for layer in row["climatology"]["layers"] if layer != SURFACE]
+    return unsupported
+
+
+def fvcom_text(unsupported):
+    """What a user is told of the analyses fvcom_unsupported finds."""
+    names = [FVCOM_TEXT[x] for x in unsupported]
+    listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    return (
+        f"this is raw FVCOM output, and {listed} {'is' if len(names) == 1 else 'are'} not yet available for "
+        "FVCOM output. So far Analyze can only work out a climatology at the surface of FVCOM output."
+    )
+
+
+def _fvcom_climatology(row, results_dir, layer, years, time_shift):
+    """The climatology of row's variable, raw FVCOM output, at the surface
+    (layer), on its own mesh (see oceanval.fvcom_climatology), saved in
+    results_dir: what INFO_FILE says of the layer, with "mesh", the part of
+    the mesh it is on, "node" or "nele"."""
+    from oceanval import fvcom_climatology
+
+    monthly = os.path.join(results_dir, f"{row['key']}_{layer}_monthly.nc")
+    annual = os.path.join(results_dir, f"{row['key']}_{layer}_annual.nc")
+    where, months = fvcom_climatology.work_out(
+        row["climatology"]["files"],
+        row["parts"],
+        list(years),
+        row["key"],
+        monthly,
+        annual,
+        row["units"],
+        f"{row['name']}, {LAYER_TITLES[layer].lower()}",
+        time_shift=time_shift,
+        as_missing=row.get("as_missing"),
+        cores=row.get("cores", 1),
+    )
+    return {
+        "title": LAYER_TITLES[layer],
+        "units": row["units"],
+        "monthly": os.path.basename(monthly),
+        "annual": os.path.basename(annual),
+        "months": months,
+        "mesh": where,
+    }
+
+
 def _first_level_is_surface(row, stream):
     """Whether row's surface can be read from the first vertical level alone,
     a reason if not (see oceanval.surface.first_level_is_surface), and whether
@@ -1219,14 +1308,16 @@ def _first_level_is_surface(row, stream):
     return fast, why, fast and surface.small_cache_helps(stream["files"][0], names, nlevels)
 
 
-def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_index=None):
+def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_index=None, refuse_fvcom=None):
     """Find the output of each of rows (check_arguments's, with "as_missing")
     in the simulation in sim_dir, and say what it is: the stream, files, units,
     time resolution and the files and dates of each analysis. Checks that the
     output has what the rows ask of it. times_index is the path of the times of
     the files already read (see model_check.save_times_index), which are not
-    read again if their files are unchanged. Raises ValueError saying everything
-    that is wrong."""
+    read again if their files are unchanged. refuse_fvcom, if given, is the
+    name of what refuses raw FVCOM output (as compare_simulations does), which
+    is otherwise worked out as fvcom_unsupported says. Raises ValueError saying
+    everything that is wrong."""
     from oceanval import time_stamps
     from oceanval.matchall import index_times
     from oceanval.model_check import files_in_years, load_times_index
@@ -1238,15 +1329,17 @@ def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_
         raise ValueError(
             f"No netCDF files were found {n_dirs_down} directories below {sim_dir}{filtered}."
         )
-    if _looks_like_fvcom(found[0]["files"][0]):
-        raise ValueError("analyze does not work with FVCOM output yet.")
+    if refuse_fvcom and found[0].get("fvcom"):
+        raise ValueError(f"{refuse_fvcom} does not work with FVCOM output yet.")
+    # raw FVCOM output, whose mesh CDO cannot read, by its files (see fvcom_unsupported)
+    fvcom_files = {tuple(stream["files"]): bool(stream.get("fvcom")) for stream in found}
 
     # the time resolution of a stream is read from some of its files: once for each
     labels = {}
 
     def time_res_of(files):
         if tuple(files) not in labels:
-            labels[tuple(files)] = stream_time_res(files)
+            labels[tuple(files)] = stream_time_res(files, fvcom_files.get(tuple(files), False))
         return labels[tuple(files)]
 
     problems = []
@@ -1260,6 +1353,24 @@ def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_
             problems.append(f"{row['name']} ({row['model_variable']}): {error}")
             continue
         row.update(describe_variable(row["model_variable"], stream))
+        row["fvcom"] = bool(stream.get("fvcom"))
+        if row["fvcom"]:
+            unsupported = fvcom_unsupported(row)
+            if unsupported:
+                problems.append(f"{row['name']} ({row['model_variable']}): {fvcom_text(unsupported)}")
+            from oceanval import fvcom_climatology
+
+            try:
+                # the parts of a sum must all be on the nodes, or all on the elements
+                fvcom_climatology.location(stream["files"][0], row["parts"])
+            except ValueError as error:
+                problems.append(f"{row['name']} ({row['model_variable']}): {error}")
+            # read with netCDF4, the top sigma layer of each part (see oceanval.fvcom_climatology)
+            row["surface_fast"] = row["surface_small_cache"] = False
+            row["pattern"] = stream["pattern"]
+            row["files"] = stream["files"]
+            row["time_res"] = res
+            continue
         if row["levels"] > 1:
             row["surface_fast"], why, row["surface_small_cache"] = _first_level_is_surface(row, stream)
             _say(f"{row['name']}: {surface.how_read(row['surface_fast'], why, row['surface_small_cache'])}")
@@ -1303,7 +1414,10 @@ def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_
         f"Reading the times of {unread} file{'s' if unread != 1 else ''}"
         + (f" (those of {len(paths) - unread} were read before)" if unread != len(paths) else "")
     )
-    times = index_times(paths, times=times)
+    fvcom_paths = sorted({path for row in rows if row["fvcom"] for path in row["files"]})
+    times = index_times([path for path in paths if path not in set(fvcom_paths)], times=times)
+    if fvcom_paths:
+        times = index_times(fvcom_paths, fvcom=True, times=dict(times))
     if time_shift:
         calendars = {}
         by_first_file = {}
@@ -1587,6 +1701,8 @@ def analyze(
     )
     for row in rows:
         row["as_missing"] = as_missing
+        # raw FVCOM output is read in this many processes (see oceanval.fvcom_climatology)
+        row["cores"] = int(cores)
     area = check_area(rows, subregions, lon_lim, lat_lim, stations)
     sim_dir = os.path.abspath(sim_dir)
     out_dir = os.path.abspath(out_dir or ".")
@@ -1625,6 +1741,8 @@ def analyze(
         "lat_lim": area["lat_lim"],
         "stations": {name: {"lon": lon, "lat": lat} for name, (lon, lat) in area["stations"].items()},
         "figure_code": bool(figure_code),
+        # whether any variable is raw FVCOM output, mapped on its own mesh
+        "fvcom": any(row.get("fvcom") for row in rows),
         # each variable's, as it is worked out
         "variables": info_rows,
     }

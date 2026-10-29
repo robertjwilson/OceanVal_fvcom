@@ -277,6 +277,8 @@ def annual_map(results_dir, key, layer):
     variable = entry(info, key)
     saved = variable["climatology"]["layers"][layer]
     path = _path(results_dir, saved["annual"])
+    if saved.get("mesh"):
+        return _mesh_annual_map(path, key, variable, saved, info)
     options = {"var": key, "robust": True, "legend": legend(variable["name"], saved["units"])}
     if _takes_grid_labels():
         options["grid_labels"] = True
@@ -368,6 +370,8 @@ def monthly_maps(results_dir, key, layer, limits=None):
     path = _path(results_dir, saved["monthly"])
     limits = _limits(path, key) if limits is None else limits
     label = legend(variable["name"], saved["units"])
+    if saved.get("mesh"):
+        return _mesh_monthly_maps(path, key, variable, saved, info, limits, label)
     if limits is None:
         scale = "# the colour scale all the months share: None leaves it to nctoolkit\nlimits = None"
     else:
@@ -407,6 +411,68 @@ def monthly_maps(results_dir, key, layer, limits=None):
         )
 
     return _map(code_for, path, info, "monthly_maps")
+
+
+# ---- the maps of raw FVCOM output, on its own mesh (see oceanval.mesh_maps) ----
+
+MESH_NOTE = "# raw FVCOM output, mapped on its own triangular mesh (see oceanval.mesh_maps)"
+
+
+def _mesh_annual_map(path, key, variable, saved, info):
+    """annual_map of raw FVCOM output."""
+    options = {"robust": True, "legend": legend(variable["name"], saved["units"]), "grid_labels": True}
+    code = _code(
+        "import matplotlib.pyplot as plt\nfrom oceanval.mesh_maps import mesh_plot\n",
+        f"# the annual mean of {variable['name']}'s climatology: {saved['title'].lower()}",
+        MESH_NOTE,
+        "# the colours run from the 2nd to the 98th percentile of the map (robust=True)",
+        _call("mesh_plot", options, args=(path, key)),
+    )
+    _run(code, "annual_map")
+    return Drawn(code, False, {}, _about(info))
+
+
+def _mesh_monthly_maps(path, key, variable, saved, info, limits, label):
+    """monthly_maps of raw FVCOM output."""
+    if limits is None:
+        scale = "# the colour scale all the months share: None leaves it to oceanval\nlimits = None"
+    else:
+        scale = (
+            "# the colour scale all the months share: the 2nd to the 98th percentile of all of them\n"
+            f"limits = {_py(limits)}"
+        )
+    size = _panel_size(path, int(saved["months"]))
+    font = (
+        "# the figure's size, in inches, and its font size: the report shows it at about the width of its page\n"
+        f"size = {_py(size)}\n"
+        f"font_size = {PANEL_FONT}"
+    )
+    panels = "\n".join(
+        [
+            "# a map of each month of the year: the months the climatology has",
+            "with netCDF4.Dataset(" + _py(path) + ") as ds:",
+            '    months = [int(month) for month in ds.variables["month"][:]]',
+            "titles = [calendar.month_abbr[month] for month in months]",
+            "ncol = 4 if len(titles) > 3 else len(titles)",
+        ]
+    )
+    call = _call(
+        "mesh_panel_plot",
+        {"ncol": _Code("ncol"), "limits": _Code("limits"), "legend": label, "grid_labels": False, "size": _Code("size")},
+        args=(path, key, _Code("titles")),
+    )
+    draw = 'with plt.rc_context({"font.size": font_size}):\n' + "\n".join("    " + line for line in call.split("\n"))
+    code = _code(
+        "import calendar\n\nimport matplotlib.pyplot as plt\nimport netCDF4\nfrom oceanval.mesh_maps import mesh_panel_plot\n",
+        f"# the climatology of {variable['name']}, month by month: {saved['title'].lower()}",
+        MESH_NOTE,
+        scale,
+        font,
+        panels,
+        draw,
+    )
+    _run(code, "monthly_maps")
+    return Drawn(code, False, {}, _about(info))
 
 
 def _all_values(paths, key):

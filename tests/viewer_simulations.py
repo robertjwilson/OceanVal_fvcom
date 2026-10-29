@@ -222,6 +222,26 @@ def fvcom_simulation(root, files=4, cartesian=False):
     return root
 
 
+def fvcom_months(root, months=((2012, 1), (2012, 2), (2012, 3), (2012, 4), (2013, 1), (2013, 2))):
+    """Daily FVCOM output under root, a file for each of months ((year,
+    month)), filed as root/<year>/estuary_<year><month>.nc: the files of
+    fvcom_file, whose surface temp is 10 + lon + the days since 2012-01-01.
+    Returns root."""
+    import calendar
+    import datetime
+
+    for year, month in months:
+        folder = os.path.join(root, str(year))
+        os.makedirs(folder, exist_ok=True)
+        first = (datetime.date(year, month, 1) - datetime.date(2012, 1, 1)).days
+        fvcom_file(
+            os.path.join(folder, f"estuary_{year}{month:02d}.nc"),
+            first_day=first,
+            n_times=calendar.monthrange(year, month)[1],
+        )
+    return root
+
+
 def land_simulation(root, land=0.0, files=3, names=("thetao",)):
     """A flat directory of files (a regular lon-lat grid, one time) whose
     variables vary from file to file in the sea and are `land` in the same 30

@@ -431,6 +431,7 @@ def compare_simulations(
                 sim["require"],
                 sim["time_shift"],
                 sim["times_index"],
+                refuse_fvcom="compare_simulations",
             )
         except ValueError as error:
             problems.extend(f"{sim['name']}: {line}" for line in str(error).splitlines())

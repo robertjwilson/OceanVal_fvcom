@@ -228,7 +228,9 @@ class TestSimulations:
 
         monkeypatch.setattr(analysis, "_looks_like_fvcom", looks)
         to_variables(app)
-        assert len(held) == 2 and all(held)
+        # once for each stream of each simulation, as its variables are read
+        streams = sum(len(found["streams"]) for found in app.sc_found.values())
+        assert len(held) == streams and held and all(held)
 
     def test_a_simulation_that_cannot_be_read(self, app, tmp_path, sims):
         os.makedirs(tmp_path / "empty" / "2013")

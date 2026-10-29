@@ -962,6 +962,9 @@
   .analyze-files .review__head { padding-bottom: 4px; }
   .analyze-options.choices.is-two { max-width: 980px; gap: 28px; }
   .analyze-options .choice { aspect-ratio: auto; min-height: 200px; padding-top: 30px; }
+  /* an analysis not yet available for the simulation's output (raw FVCOM's: see analysis_app.FVCOM_NOTE) */
+  .analyze-options .choice:disabled { cursor: not-allowed; opacity: 0.55; box-shadow: none; transform: none; border-style: dashed; }
+  .analyze-options .choice:disabled:hover { border-color: var(--line); box-shadow: none; transform: none; }
   .analyze-area { max-width: 980px; margin: 28px 0 0; }
   .analyze-area .s-select { width: auto; min-width: 280px; }
   .analyze-area .group__line.is-ersem, .missing-field .group__line.is-ersem, #setup-missing .group__line.is-ersem { color: var(--ersem); font-weight: 600; }
@@ -1856,6 +1859,7 @@
   <section id="view-analyze-options" hidden>
     <div id="ao-page-1">
     <p class="sc-analyze-note" id="ao-compare-note" hidden>Everything you choose is worked out for <strong>every</strong> simulation, over the same years, which must be years all of them have, and the cell thickness (a variable in each simulation's output, or a file) is the same in all of them.</p>
+    <p class="sc-analyze-note" id="ao-fvcom-note" role="note" hidden></p>
     <p class="lede" id="ao-select">Select one or more of the analyses</p>
     <div class="choices is-two analyze-options">
       <button type="button" class="choice" id="ao-climatology" aria-haspopup="dialog">
@@ -5469,6 +5473,10 @@
   const CHANGE_KINDS = { absolute: "Absolute change", percentage: "Percentage change" };
   const analyzeDialog = { kind: null, opener: null, rows: {}, thickness: null, stations: [] };
 
+  // what Analyze cannot yet work out of raw FVCOM output (see analysis_app.FVCOM_NOT_YET): all but the climatology at the surface
+  const FVCOM_NOT_YET = "Not yet available for FVCOM output";
+  const fvcomNotYet = (kind) => Boolean(state.analyze.fvcom) && kind !== "climatology";
+
   function yearSpan(start, end) {
     return String(start) === String(end) ? String(start) : `${start}–${end}`;
   }
@@ -5499,9 +5507,21 @@
     $("ao-page-2").hidden = analyzePage.number !== 2;
     $("ao-page-3").hidden = analyzePage.number !== 3;
     $("ao-compare-note").hidden = state.action !== "simcompare";
+    // raw FVCOM output: only the climatology (at the surface) can be worked out of it so far
+    $("ao-fvcom-note").hidden = !state.analyze.fvcom;
+    $("ao-fvcom-note").textContent = state.analyze.fvcom ? state.analyze.fvcom_note : "";
     for (const kind of ANALYSES) {
       const tile = $(`ao-${kind}`);
       const chosen = Boolean(state.analyze.chosen[kind]);
+      const notYet = fvcomNotYet(kind);
+      tile.disabled = notYet;
+      if (notYet) {
+        tile.classList.remove("is-chosen");
+        tile.querySelector(".choice__tag").hidden = true;
+        tile.querySelector(".choice__remove").hidden = true;
+        $(`ao-${kind}-text`).textContent = FVCOM_NOT_YET;
+        continue;
+      }
       tile.classList.toggle("is-chosen", chosen);
       tile.querySelector(".choice__tag").hidden = !chosen;
       tile.querySelector(".choice__remove").hidden = !chosen;
@@ -5855,13 +5875,16 @@
       use.checked = Boolean(box.use);
       const surface = el("input", { type: "checkbox", class: "tick", "aria-label": `${row.name} at the surface` });
       surface.checked = Boolean(box.surface);
-      const column = row.levels > 1;
+      // raw FVCOM output has its surface only, so far
+      const fvcom = Boolean(state.analyze.fvcom);
+      const column = row.levels > 1 && !fvcom;
       const bottom = el("input", { type: "checkbox", class: "tick", "aria-label": `${row.name} at the bottom` });
       bottom.checked = column && Boolean(box.bottom);
       bottom.disabled = !column;
       const water = el("input", { type: "checkbox", class: "tick", "aria-label": `${row.name} through the water column` });
       water.checked = column && Boolean(box.water_column);
       water.disabled = !column;
+      const noColumn = () => el("small", { text: fvcom ? FVCOM_NOT_YET : "No depth levels" });
       const how = el("select", { class: "s-select", "aria-label": `How to take ${row.name} through the water column` },
         el("option", { value: "", text: "Choose…" }),
         el("option", { value: "mean", text: "Vertical mean" }), el("option", { value: "integral", text: "Depth integral" }));
@@ -5882,10 +5905,10 @@
         el("td", {}, withInfo(el("label", { class: "tick-label" }, surface, "Surface"), kind, "surface", `the surface option of ${row.name}`)),
         el("td", {}, column
           ? withInfo(el("label", { class: "tick-label" }, bottom, "Bottom"), kind, "bottom", `the bottom option of ${row.name}`)
-          : el("small", { text: "No depth levels" })),
+          : noColumn()),
         el("td", {}, column
           ? el("div", {}, withInfo(el("label", { class: "tick-label" }, water, "Water column"), kind, "water_column", `the water column option of ${row.name}`), how)
-          : el("small", { text: "No depth levels" })),
+          : noColumn()),
         ...(series ? [el("td", {}, rolling), el("td", {}, show)] : []));
       const refresh = () => {
         how.disabled = !water.checked;
@@ -6113,8 +6136,8 @@
         ...Object.entries(options).map(([value, text]) => el("option", { value, text })));
       return controls[key];
     };
-    const column = placed.some((row) => row.levels > 1);
-    const noLevels = () => el("small", { text: "No depth levels" });
+    const column = placed.some((row) => row.levels > 1) && !state.analyze.fvcom;
+    const noLevels = () => el("small", { text: state.analyze.fvcom ? FVCOM_NOT_YET : "No depth levels" });
     const layers = () => [
       el("td", {}, withInfo(tickOf("surface", "The surface", "Surface"), kind, "surface", "the surface option of every variable")),
       el("td", {}, column ? withInfo(tickOf("bottom", "The bottom", "Bottom"), kind, "bottom", "the bottom option of every variable") : noLevels()),

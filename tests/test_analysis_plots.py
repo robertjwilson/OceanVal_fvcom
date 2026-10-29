@@ -34,8 +34,9 @@ from simulations import (  # noqa: E402
     write_analysis_simulation,
     write_curvilinear_simulation,
 )
+from viewer_simulations import fvcom_months  # noqa: E402
 
-CASES = ("daily", "series", "many", "curvilinear", "transects", "changes", "curvilinear_changes")
+CASES = ("daily", "series", "many", "curvilinear", "transects", "changes", "curvilinear_changes", "fvcom")
 SERIES = {"Temperature": {"start": 2012, "end": 2014, "surface": True, "bottom": True, "water_column": "mean"}}
 
 
@@ -135,6 +136,12 @@ def analyses(tmp_path_factory):
         sim_dir=curvilinear_two, variables={"SST": "sst"},
         map_changes={"SST": {"historical": {"start": 2013, "end": 2013}, "future": [{"start": 2014, "end": 2014}],
                              "plot": "absolute_changes", "change": "absolute", "surface": True}},
+    )
+    # raw FVCOM output: its surface climatology, on the nodes and on the elements, mapped on its mesh
+    fvcom = fvcom_months(str(root / "fvcom_sim"))
+    runs["fvcom"] = dict(
+        sim_dir=fvcom, variables={"Temperature": "temp", "Velocity": "u"},
+        climatology={name: {"start": 2012, "end": 2013, "surface": True} for name in ("Temperature", "Velocity")},
     )
     found = {}
     with pytest.MonkeyPatch.context() as patch:

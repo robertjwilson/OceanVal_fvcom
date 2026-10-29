@@ -1,10 +1,26 @@
-"""The surface climatology of raw FVCOM output, on its own mesh, for analyze().
+"""The climatology of raw FVCOM output, on its own mesh, for analyze(): at
+the surface, at the bottom, and the vertical mean or depth integral of the
+water column.
 
 CDO cannot read FVCOM's unstructured variables (see oceanval.fvcom), so the
 nctoolkit chain the rest of Analyze uses cannot work them out. Here they are
-read with netCDF4, the top sigma layer (siglay 0, FVCOM's first layer being the
-one at the surface) of a block of times at a time, so a file is never read
-whole: for each month of each year, the sum of each node's (or element's)
+read with netCDF4, a block of times at a time, so a file is never read whole,
+and each time step is taken to its layer as nctoolkit would take it:
+
+- the surface is the top sigma layer (siglay 0, FVCOM's first layer being the
+  one at the surface);
+- the bottom is the deepest layer with a value, as nctoolkit's
+  bottom(choice="value") (CDO's bottomvalue) takes it;
+- the water column is weighted by the thickness of each layer, as nctoolkit's
+  vertical_mean and vertical_integration weight it: the integral is the sum
+  of value x thickness, and the mean that divided by the sum of the
+  thicknesses of the layers with a value. A layer's thickness is its share of
+  the sigma levels (siglev, 0 at the surface to -1 at the seabed) of the depth
+  of the water, h + zeta, as oceanval.fvcom takes the depths of the layers,
+  at each time step. On the elements, the depth of the water is the mean of
+  their three nodes' (siglev_center gives their levels, if the file has it).
+
+Then for each month of each year, the sum of each node's (or element's)
 values and how many there are. The monthly mean of each year is taken first,
 then the climatology is the mean of each month of the year over the years, and
 the annual mean the mean of those, as analysis.climatology_of does.
@@ -27,8 +43,17 @@ import numpy as np
 # the location of a variable on the mesh: its nodes or its elements
 NODE = "node"
 NELE = "nele"
-# the vertical dimension of a variable on sigma layers, whose first is the surface
+# the vertical dimensions: the sigma layers, whose first is the surface, and the
+# sigma levels, the layers' tops and bottoms
 SIGLAY = "siglay"
+SIGLEV = "siglev"
+VERTICAL = (SIGLAY, SIGLEV)
+# the layers a climatology can be worked out at, as analysis.LAYER_TITLES names them
+SURFACE = "surface"
+BOTTOM = "bottom"
+MEAN = "mean"
+INTEGRAL = "integral"
+LAYERS = (SURFACE, BOTTOM, MEAN, INTEGRAL)
 # the mesh, as the results files keep it, so a map can be drawn of them alone
 MESH = ("lon", "lat", "lonc", "latc", "x", "y", "nv")
 # the most values read at once, from one variable
@@ -50,7 +75,7 @@ def variables(path):
             dims = variable.dimensions
             if name in MESH_VARIABLES or not ({NODE, NELE} & set(dims)) or "time" not in dims:
                 continue
-            levels = [len(handle.dimensions[dim]) for dim in dims if dim in (SIGLAY, "siglev")]
+            levels = [len(handle.dimensions[dim]) for dim in dims if dim in VERTICAL]
             found[str(name)] = {
                 "long_name": str(getattr(variable, "long_name", "")),
                 "units": str(getattr(variable, "units", "")),
@@ -83,6 +108,25 @@ def location(path, parts):
     return next(iter(found.values()))
 
 
+def vertical(path, parts):
+    """The vertical dimension of each of the variables in parts in the FVCOM
+    file at path: {name: SIGLAY, SIGLEV or None, for one with none}."""
+    import netCDF4
+
+    with netCDF4.Dataset(path) as handle:
+        return {
+            name: next((dim for dim in handle.variables[name].dimensions if dim in VERTICAL), None) for name in parts
+        }
+
+
+def not_layered(path, parts):
+    """Those of parts that are not on the sigma layers (siglay) of the FVCOM
+    file at path, and so have no water column to take: those on the sigma
+    levels (siglev), the tops and bottoms of the layers, and those with no
+    vertical dimension."""
+    return [name for name, dim in vertical(path, parts).items() if dim != SIGLAY]
+
+
 def _times(handle, time_shift):
     """The (year, month) of each time in an open FVCOM file, moved by
     time_shift days."""
@@ -109,48 +153,181 @@ def _missing(values, as_missing):
     return values
 
 
-def _surface(variable, start, stop):
-    """The values of variable at times start to stop, at the surface, as a
-    (time, cells) float64 array with NaN where they are missing."""
+def _read(variable, start, stop, level=None):
+    """The values of variable at times start to stop as a float64 array with
+    NaN where they are missing: at its level-th sigma layer (or level), as
+    (time, cells), or with level None at all of them, as (time, levels,
+    cells). A variable with no vertical dimension is (time, cells)."""
     dims = variable.dimensions
-    index = []
+    index, kept = [], []
     for dim in dims:
         if dim == "time":
             index.append(slice(start, stop))
+            kept.append(dim)
         elif dim in (NODE, NELE):
             index.append(slice(None))
+            kept.append(dim)
+        elif dim in VERTICAL and level is None:
+            index.append(slice(None))
+            kept.append(dim)
         else:
-            # siglay (or siglev): the first, at the surface
-            index.append(0)
+            # the level asked for (any other dimension: its first)
+            index.append(level if dim in VERTICAL else 0)
     variable.set_auto_maskandscale(True)
     values = np.ma.filled(np.ma.asarray(variable[tuple(index)]).astype("float64"), np.nan)
-    return values.reshape(stop - start, -1)
+    # in the order time, levels, cells, whatever the file's
+    values = np.transpose(values, [kept.index(dim) for dim in ("time",) + VERTICAL + (NODE, NELE) if dim in kept])
+    return values.reshape((stop - start,) + values.shape[1:-1] + (-1,))
 
 
-def file_sums(path, parts, years, time_shift=None, as_missing=None):
-    """The sums of the values of the sum of parts at the surface in one FVCOM
-    file, and how many there are, in each month of years ([first, last]):
-    {(year, month): (sums, counts)}, each an array with a value for each
-    cell. A cell missing in any part is missing in the sum, as CDO sums."""
+def _summed(handle, parts, start, stop, as_missing, level=None):
+    """The sum of parts (see _read), with as_missing made missing in each. A
+    value missing in any part is missing in the sum, as CDO sums."""
+    values = None
+    for name in parts:
+        part = _missing(_read(handle.variables[name], start, stop, level), as_missing)
+        values = part if values is None else values + part
+    return values
+
+
+def _bottom(handle, parts, start, stop, as_missing):
+    """The sum of the deepest value of each of parts that is not missing, at
+    times start to stop, as (time, cells): the last layer, and the layers
+    above only where it is missing, as nctoolkit's bottom(choice="value")
+    takes it (a part with no vertical dimension is as it is)."""
+    values = None
+    for name in parts:
+        part = _deepest(handle, name, start, stop, as_missing)
+        values = part if values is None else values + part
+    return values
+
+
+def _deepest(handle, name, start, stop, as_missing):
+    """The deepest value of the variable name that is not missing (see _bottom)."""
+    dim = next((dim for dim in handle.variables[name].dimensions if dim in VERTICAL), None)
+    if dim is None:
+        return _summed(handle, [name], start, stop, as_missing, 0)
+    levels = len(handle.dimensions[dim])
+    values = _summed(handle, [name], start, stop, as_missing, levels - 1)
+    for level in range(levels - 2, -1, -1):
+        gap = ~np.isfinite(values)
+        if not gap.any():
+            break
+        above = _summed(handle, [name], start, stop, as_missing, level)
+        values[gap] = above[gap]
+    return values
+
+
+def _needed(handle, name, path):
+    if name not in handle.variables:
+        raise ValueError(
+            f"{path} has no {name}, which the water column of FVCOM output needs: the thickness of its "
+            "layers is worked out from the sigma levels (siglev), the bathymetry (h) and the surface "
+            "elevation (zeta, taken as 0 if it is not there)."
+        )
+    variable = handle.variables[name]
+    variable.set_auto_maskandscale(True)
+    return np.ma.filled(np.ma.asarray(variable[:]).astype("float64"), np.nan)
+
+
+def _nv(handle):
+    """The nodes of each element, from 0, as (3, elements)."""
+    nv = np.asarray(handle.variables["nv"][:]).astype("int64")
+    return nv - 1
+
+
+def _shares(handle, where, path):
+    """The share of the depth of the water in each sigma layer, as (layers,
+    cells), or (layers, 1) if the sigma levels are the same everywhere."""
+    if where == NELE and "siglev_center" in handle.variables:
+        siglev = _needed(handle, "siglev_center", path)
+        on_nodes = False
+    else:
+        siglev = _needed(handle, SIGLEV, path)
+        on_nodes = siglev.ndim > 1
+    if siglev.ndim == 1:
+        siglev = siglev[:, None]
+    # the sigma levels run from 0 at the surface to -1 at the seabed
+    shares = np.abs(siglev[:-1] - siglev[1:])
+    if where == NELE and on_nodes:
+        shares = shares[:, _nv(handle)].mean(axis=1)
+    return shares
+
+
+def _depth_of_water(handle, where, start, stop, h):
+    """The depth of the water, h + zeta, at times start to stop, as (time,
+    cells): on the elements the mean of their three nodes'. Missing where it
+    is not above 0 (a dry cell)."""
+    if "zeta" in handle.variables:
+        zeta = _read(handle.variables["zeta"], start, stop)
+    else:
+        zeta = np.zeros((stop - start, h.size))
+    depth = h[None, :] + zeta
+    if where == NELE:
+        depth = depth[:, _nv(handle)].mean(axis=1)
+    depth[~(depth > 0)] = np.nan
+    return depth
+
+
+def _column(handle, parts, start, stop, as_missing, layer, where, shares, h):
+    """The vertical mean (layer MEAN) or depth integral (INTEGRAL) of the sum
+    of parts at times start to stop, as (time, cells), each layer weighted by
+    its thickness, as nctoolkit's vertical_mean and vertical_integration
+    weight them. A layer with no value is left out; a column with none, or no
+    depth of water, is missing."""
+    values = _summed(handle, parts, start, stop, as_missing)
+    thickness = shares[None, :, :] * _depth_of_water(handle, where, start, stop, h)[:, None, :]
+    ok = np.isfinite(values) & np.isfinite(thickness)
+    total = np.where(ok, values * thickness, 0.0).sum(axis=1)
+    if layer == INTEGRAL:
+        return np.where(ok.any(axis=1), total, np.nan)
+    depth = np.where(ok, thickness, 0.0).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(depth > 0, total / np.where(depth > 0, depth, 1.0), np.nan)
+
+
+def file_sums(path, parts, years, time_shift=None, as_missing=None, layer=SURFACE):
+    """The sums of the values of the sum of parts in layer (one of LAYERS)
+    in one FVCOM file, and how many there are, in each month of years
+    ([first, last]): {(year, month): (sums, counts)}, each an array with a
+    value for each cell. A cell missing in any part is missing in the sum, as
+    CDO sums."""
     import netCDF4
 
+    if layer not in LAYERS:
+        raise ValueError(f"layer must be one of {', '.join(LAYERS)}, not {layer}.")
     found = {}
     with netCDF4.Dataset(path) as handle:
         months = _times(handle, time_shift)
         if not months:
             return found
         first = handle.variables[parts[0]]
+        where = NODE if NODE in first.dimensions else NELE
         cells = int(np.prod([len(handle.dimensions[dim]) for dim in first.dimensions if dim in (NODE, NELE)]))
-        block = max(1, BLOCK_VALUES // max(cells, 1))
+        read = 1
+        if layer in (MEAN, INTEGRAL):
+            bad = [name for name in parts if SIGLAY not in handle.variables[name].dimensions]
+            if bad:
+                raise ValueError(
+                    f"{', '.join(bad)} {'is' if len(bad) == 1 else 'are'} not on the sigma layers (siglay) of the "
+                    "FVCOM mesh, so there is no water column to take."
+                )
+            shares = _shares(handle, where, path)
+            h = _needed(handle, "h", path)
+            # the layers of a block at once, and their thicknesses
+            read = 2 * len(handle.dimensions[SIGLAY])
+        block = max(1, BLOCK_VALUES // max(cells * read, 1))
         for start in range(0, len(months), block):
             stop = min(start + block, len(months))
             wanted = [i for i in range(start, stop) if years[0] <= months[i][0] <= years[1]]
             if not wanted:
                 continue
-            values = None
-            for name in parts:
-                part = _missing(_surface(handle.variables[name], start, stop), as_missing)
-                values = part if values is None else values + part
+            if layer == SURFACE:
+                values = _summed(handle, parts, start, stop, as_missing, 0)
+            elif layer == BOTTOM:
+                values = _bottom(handle, parts, start, stop, as_missing)
+            else:
+                values = _column(handle, parts, start, stop, as_missing, layer, where, shares, h)
             for i in wanted:
                 row = values[i - start]
                 sums, counts = found.setdefault(months[i], (np.zeros(row.size), np.zeros(row.size, dtype="int64")))
@@ -171,10 +348,10 @@ def _add(total, found):
 
 def _run_jobs(jobs, out_dir):
     """Work out the file_sums of each of jobs ([path, parts, years,
-    time_shift, as_missing]), saving each as out_dir/<n>.npz: the script
-    each worker process runs."""
-    for number, (path, parts, years, time_shift, as_missing) in jobs:
-        found = file_sums(path, parts, years, time_shift, as_missing)
+    time_shift, as_missing, layer]), saving each as out_dir/<n>.npz: the
+    script each worker process runs."""
+    for number, (path, parts, years, time_shift, as_missing, layer) in jobs:
+        found = file_sums(path, parts, years, time_shift, as_missing, layer)
         arrays = {}
         for (year, month), (sums, counts) in found.items():
             arrays[f"sums_{year}_{month}"] = sums
@@ -192,17 +369,19 @@ def _read_saved(path):
     return found
 
 
-def monthly_sums(files, parts, years, time_shift=None, as_missing=None, cores=1):
-    """The file_sums of every one of files, added: {(year, month): (sums,
-    counts)}. With cores > 1 the files are shared out to that many processes
-    running this file as a script."""
+def monthly_sums(files, parts, years, time_shift=None, as_missing=None, cores=1, layer=SURFACE):
+    """The file_sums of every one of files in layer, added: {(year, month):
+    (sums, counts)}. With cores > 1 the files are shared out to that many
+    processes running this file as a script."""
     total = {}
     workers = max(1, min(int(cores), len(files)))
     if workers == 1:
         for path in files:
-            _add(total, file_sums(path, parts, years, time_shift, as_missing))
+            _add(total, file_sums(path, parts, years, time_shift, as_missing, layer))
         return total
-    jobs = [[number, [path, list(parts), list(years), time_shift, as_missing]] for number, path in enumerate(files)]
+    jobs = [
+        [number, [path, list(parts), list(years), time_shift, as_missing, layer]] for number, path in enumerate(files)
+    ]
     with tempfile.TemporaryDirectory(prefix="oceanval_fvcom_") as out_dir:
         running = []
         for worker in range(workers):
@@ -297,14 +476,16 @@ def save(path, key, where, months, fields, year, mesh_from, units, long_name):
     return path
 
 
-def work_out(files, parts, years, key, monthly, annual, units, long_name, time_shift=None, as_missing=None, cores=1):
-    """The surface climatology of the sum of parts in the FVCOM files, over
-    years ([first, last]): its monthly climatology saved at monthly, and its
-    annual mean, the mean of the months, at annual. Returns (where, months):
+def work_out(files, parts, years, key, monthly, annual, units, long_name, time_shift=None, as_missing=None, cores=1,
+             layer=SURFACE):
+    """The climatology in layer (one of LAYERS) of the sum of parts in the
+    FVCOM files, over years ([first, last]): its monthly climatology saved
+    at monthly, and its annual mean, the mean of the months, at annual.
+    Returns (where, months):
     the part of the mesh it is on, and how many months the climatology has.
     Raises ValueError if there is no output in years."""
     where = location(files[0], parts)
-    total = monthly_sums(files, parts, years, time_shift, as_missing, cores)
+    total = monthly_sums(files, parts, years, time_shift, as_missing, cores, layer)
     if not total:
         raise ValueError(f"There is no output of {'+'.join(parts)} in {years[0]}-{years[1]}.")
     months, fields = climatology(total)

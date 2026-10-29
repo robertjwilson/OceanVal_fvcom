@@ -397,10 +397,11 @@ def _check_series_options(box, start, end, found):
     return window, box["show"]
 
 
-def check_climatology(form, placed, known_years, available, cwd, label="climatology", series=False):
+def check_climatology(form, placed, known_years, available, cwd, label="climatology", series=False, fvcom=False):
     """Check the climatology pop-out's boxes (see clean_climatology). series is
     True for the long-term series' pop-out, which also has a rolling mean and a
-    way of showing the series.
+    way of showing the series. fvcom: the output is raw FVCOM output, whose
+    cell thickness analyze() works out itself, so none is asked for.
     known_years(name) is the first and last years of a variable's output,
     or None; available the model's variable names, which a thickness can be
     one of. Returns (climatology, thickness, errors): climatology as
@@ -436,7 +437,7 @@ def check_climatology(form, placed, known_years, available, cwd, label="climatol
             chosen[row["name"]]["show"] = show
         column = column or box["water_column"]
     thickness = None
-    if column:
+    if column and not fvcom:
         thickness = check_thickness(form["thickness"], available, cwd, errors)
     if not chosen and not errors:
         errors["rows"] = f"Tick Surface, Bottom, Water column, or more than one, for at least one variable to work out the {label} of."

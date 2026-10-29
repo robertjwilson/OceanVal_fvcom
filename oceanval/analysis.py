@@ -197,6 +197,7 @@ def check_arguments(
     seasonal=None,
     transects=None,
     map_changes=None,
+    defer_thickness=False,
 ):
     """analyze()'s variables, climatology, phenology, long_term, seasonal,
     transects and map_changes, checked, as
@@ -298,6 +299,15 @@ def check_arguments(
             }
         rows.append(row)
 
+    if not defer_thickness:
+        require_thickness(rows, thickness)
+    return [row for row in rows if any(row[kind] for kind in KINDS)]
+
+
+def require_thickness(rows, thickness):
+    """Raise ValueError if any of rows (check_arguments's) needs the cell
+    thickness, for the water column or a vertical transect, and thickness
+    does not give it."""
     if any(
         layer in WATER_COLUMN
         for row in rows
@@ -316,7 +326,6 @@ def check_arguments(
                 f'the thickness variable in the output (e.g. "e3t"), a thickness file, or "{Z_LEVEL}" '
                 "for output on fixed depth levels."
             )
-    return [row for row in rows if any(row[kind] for kind in KINDS)]
 
 
 def check_as_missing(as_missing):
@@ -1232,27 +1241,22 @@ def _work_out(row, results_dir, thickness, thickness_for, time_shift, area=None,
     return entry
 
 
-# what Analyze can work out of raw FVCOM output so far: a climatology at the surface
+# what Analyze can work out of raw FVCOM output so far: a climatology (at the surface, the bottom
+# or through the water column)
 FVCOM_TEXT = {
     "phenology": "phenology",
     "long_term": "long-term time series",
     "seasonal": "seasonal cycles",
     "map_changes": "map temporal changes",
     "transects": "transects",
-    BOTTOM: "the climatology at the bottom",
-    "mean": "the climatology's water column (vertical mean)",
-    "integral": "the climatology's water column (depth integral)",
 }
 
 
 def fvcom_unsupported(row):
     """What row (check_arguments's) asks for that Analyze cannot yet work
     out of raw FVCOM output, as keys of FVCOM_TEXT: everything but a
-    climatology at the surface."""
-    unsupported = [kind for kind in KINDS if kind != "climatology" and row[kind]]
-    if row["climatology"]:
-        unsupported += [layer for layer in row["climatology"]["layers"] if layer != SURFACE]
-    return unsupported
+    climatology."""
+    return [kind for kind in KINDS if kind != "climatology" and row[kind]]
 
 
 def fvcom_text(unsupported):
@@ -1261,19 +1265,21 @@ def fvcom_text(unsupported):
     listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
     return (
         f"this is raw FVCOM output, and {listed} {'is' if len(names) == 1 else 'are'} not yet available for "
-        "FVCOM output. So far Analyze can only work out a climatology at the surface of FVCOM output."
+        "FVCOM output. So far Analyze can only work out a climatology of FVCOM output (at the surface, the bottom "
+        "or through the water column)."
     )
 
 
 def _fvcom_climatology(row, results_dir, layer, years, time_shift):
-    """The climatology of row's variable, raw FVCOM output, at the surface
-    (layer), on its own mesh (see oceanval.fvcom_climatology), saved in
+    """The climatology of row's variable, raw FVCOM output, in layer (see
+    LAYER_TITLES), on its own mesh (see oceanval.fvcom_climatology), saved in
     results_dir: what INFO_FILE says of the layer, with "mesh", the part of
     the mesh it is on, "node" or "nele"."""
     from oceanval import fvcom_climatology
 
     monthly = os.path.join(results_dir, f"{row['key']}_{layer}_monthly.nc")
     annual = os.path.join(results_dir, f"{row['key']}_{layer}_annual.nc")
+    units = integral_units(row["units"]) if layer == "integral" else row["units"]
     where, months = fvcom_climatology.work_out(
         row["climatology"]["files"],
         row["parts"],
@@ -1281,15 +1287,16 @@ def _fvcom_climatology(row, results_dir, layer, years, time_shift):
         row["key"],
         monthly,
         annual,
-        row["units"],
+        units,
         f"{row['name']}, {LAYER_TITLES[layer].lower()}",
         time_shift=time_shift,
         as_missing=row.get("as_missing"),
         cores=row.get("cores", 1),
+        layer=layer,
     )
     return {
         "title": LAYER_TITLES[layer],
-        "units": row["units"],
+        "units": units,
         "monthly": os.path.basename(monthly),
         "annual": os.path.basename(annual),
         "months": months,
@@ -1365,13 +1372,20 @@ def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_
                 fvcom_climatology.location(stream["files"][0], row["parts"])
             except ValueError as error:
                 problems.append(f"{row['name']} ({row['model_variable']}): {error}")
-            # read with netCDF4, the top sigma layer of each part (see oceanval.fvcom_climatology)
+            column = row["climatology"] and any(layer in WATER_COLUMN for layer in row["climatology"]["layers"])
+            bad = fvcom_climatology.not_layered(stream["files"][0], row["parts"]) if column else []
+            if bad and row["levels"] > 1:
+                # a variable with one level is told below; one on the tops and bottoms of the layers
+                # (siglev), not in them, has no thickness to weight it by
+                problems.append(
+                    f"{row['name']} ({row['model_variable']}): the water column needs every part of it on the "
+                    f"sigma layers (siglay) of the FVCOM mesh, and {', '.join(bad)} {'is' if len(bad) == 1 else 'are'} "
+                    "not (on the sigma levels, siglev, the tops and bottoms of the layers, or with no vertical "
+                    "levels), so its water column is not yet available: leave out its water_column."
+                )
+            # read with netCDF4, a layer of each part at a time (see oceanval.fvcom_climatology)
             row["surface_fast"] = row["surface_small_cache"] = False
-            row["pattern"] = stream["pattern"]
-            row["files"] = stream["files"]
-            row["time_res"] = res
-            continue
-        if row["levels"] > 1:
+        elif row["levels"] > 1:
             row["surface_fast"], why, row["surface_small_cache"] = _first_level_is_surface(row, stream)
             _say(f"{row['name']}: {surface.how_read(row['surface_fast'], why, row['surface_small_cache'])}")
         else:
@@ -1578,6 +1592,9 @@ def analyze(
         transects (to place each cell at its depth): the name of the
         thickness variable in the output (e.g. "e3t"), a file with the
         thickness in it, or "z_level" for output on fixed depth levels.
+        Raw FVCOM output needs none: the thickness of its layers is worked
+        out from its sigma levels (siglev), bathymetry (h) and surface
+        elevation (zeta), at each time.
     time_shift : int
         Days to move the model's times by before they are used, e.g. -1 for
         time means dated at the end of the period they cover (see matchup).
@@ -1696,8 +1713,10 @@ def analyze(
     if not isinstance(figure_code, (bool, np.bool_)):
         raise ValueError("figure_code must be True or False.")
     as_missing = check_as_missing(as_missing)
+    # the thickness is checked once the output is found: raw FVCOM output's is worked out from its mesh
     rows = check_arguments(
-        variables, climatology, phenology, thickness, time_shift, long_term, seasonal, transects, map_changes
+        variables, climatology, phenology, thickness, time_shift, long_term, seasonal, transects, map_changes,
+        defer_thickness=True,
     )
     for row in rows:
         row["as_missing"] = as_missing
@@ -1714,6 +1733,7 @@ def analyze(
             raise ValueError("times_index must be the path of a file, or left out.")
         times_index = os.path.abspath(os.fspath(times_index))
     locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_index)
+    require_thickness([row for row in rows if not row.get("fvcom")], thickness)
 
     # any analysis there before is replaced, as validate() replaces its report
     folder = os.path.join(out_dir, FOLDER)

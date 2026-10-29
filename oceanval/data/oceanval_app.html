@@ -2352,6 +2352,7 @@
         <p class="analyze-msg" id="clim-thickness-msg"></p>
         <datalist id="clim-thickness-options"></datalist>
       </div>
+      <p class="analyze-dialog__intro" id="clim-fvcom-thickness" hidden>For FVCOM output the cell thickness is worked out from its sigma levels (<code>siglev</code>), bathymetry (<code>h</code>) and surface elevation (<code>zeta</code>), at each time.</p>
       <div class="analyze-stations" id="clim-area" hidden>
         <h3>Regional subdomains and area <span class="own-opt">Optional</span></h3>
         <p class="analyze-dialog__intro">The time series are always worked out for the model's domain as a whole. Choose regional subdomains, as in the validation, to work them out for each region too, and cut a box out of the domain if you want only part of it. The long-term time series and the seasonal cycles share these, and the stations are not cut by the box.</p>
@@ -5473,7 +5474,7 @@
   const CHANGE_KINDS = { absolute: "Absolute change", percentage: "Percentage change" };
   const analyzeDialog = { kind: null, opener: null, rows: {}, thickness: null, stations: [] };
 
-  // what Analyze cannot yet work out of raw FVCOM output (see analysis_app.FVCOM_NOT_YET): all but the climatology at the surface
+  // what Analyze cannot yet work out of raw FVCOM output (see analysis_app.FVCOM_NOT_YET): all but the climatology
   const FVCOM_NOT_YET = "Not yet available for FVCOM output";
   const fvcomNotYet = (kind) => Boolean(state.analyze.fvcom) && kind !== "climatology";
 
@@ -5507,7 +5508,7 @@
     $("ao-page-2").hidden = analyzePage.number !== 2;
     $("ao-page-3").hidden = analyzePage.number !== 3;
     $("ao-compare-note").hidden = state.action !== "simcompare";
-    // raw FVCOM output: only the climatology (at the surface) can be worked out of it so far
+    // raw FVCOM output: only the climatology can be worked out of it so far
     $("ao-fvcom-note").hidden = !state.analyze.fvcom;
     $("ao-fvcom-note").textContent = state.analyze.fvcom ? state.analyze.fvcom_note : "";
     for (const kind of ANALYSES) {
@@ -5875,16 +5876,14 @@
       use.checked = Boolean(box.use);
       const surface = el("input", { type: "checkbox", class: "tick", "aria-label": `${row.name} at the surface` });
       surface.checked = Boolean(box.surface);
-      // raw FVCOM output has its surface only, so far
-      const fvcom = Boolean(state.analyze.fvcom);
-      const column = row.levels > 1 && !fvcom;
+      const column = row.levels > 1;
       const bottom = el("input", { type: "checkbox", class: "tick", "aria-label": `${row.name} at the bottom` });
       bottom.checked = column && Boolean(box.bottom);
       bottom.disabled = !column;
       const water = el("input", { type: "checkbox", class: "tick", "aria-label": `${row.name} through the water column` });
       water.checked = column && Boolean(box.water_column);
       water.disabled = !column;
-      const noColumn = () => el("small", { text: fvcom ? FVCOM_NOT_YET : "No depth levels" });
+      const noColumn = () => el("small", { text: "No depth levels" });
       const how = el("select", { class: "s-select", "aria-label": `How to take ${row.name} through the water column` },
         el("option", { value: "", text: "Choose…" }),
         el("option", { value: "mean", text: "Vertical mean" }), el("option", { value: "integral", text: "Depth integral" }));
@@ -6136,8 +6135,8 @@
         ...Object.entries(options).map(([value, text]) => el("option", { value, text })));
       return controls[key];
     };
-    const column = placed.some((row) => row.levels > 1) && !state.analyze.fvcom;
-    const noLevels = () => el("small", { text: state.analyze.fvcom ? FVCOM_NOT_YET : "No depth levels" });
+    const column = placed.some((row) => row.levels > 1);
+    const noLevels = () => el("small", { text: "No depth levels" });
     const layers = () => [
       el("td", {}, withInfo(tickOf("surface", "The surface", "Surface"), kind, "surface", "the surface option of every variable")),
       el("td", {}, column ? withInfo(tickOf("bottom", "The bottom", "Bottom"), kind, "bottom", "the bottom option of every variable") : noLevels()),
@@ -6209,7 +6208,11 @@
       return;
     }
     const any = Object.values(analyzeDialog.rows).some((row) => row.use.checked && row.water && row.water.checked);
-    $(`${dialogPrefix(analyzeDialog.kind)}-thickness-row`).hidden = !any;
+    // raw FVCOM output's cell thickness is worked out from its mesh (see oceanval.fvcom_climatology)
+    const fvcom = Boolean(state.analyze.fvcom);
+    $(`${dialogPrefix(analyzeDialog.kind)}-thickness-row`).hidden = !any || fvcom;
+    const note = $(`${dialogPrefix(analyzeDialog.kind)}-fvcom-thickness`);
+    if (note) note.hidden = !any || !fvcom;
   }
 
   // the cell thickness of another of the pop-outs that has been confirmed: there is one for all of them

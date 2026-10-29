@@ -137,11 +137,15 @@ def analyses(tmp_path_factory):
         map_changes={"SST": {"historical": {"start": 2013, "end": 2013}, "future": [{"start": 2014, "end": 2014}],
                              "plot": "absolute_changes", "change": "absolute", "surface": True}},
     )
-    # raw FVCOM output: its surface climatology, on the nodes and on the elements, mapped on its mesh
+    # raw FVCOM output: its climatology at the surface, the bottom and through the water column, on the
+    # nodes and on the elements, mapped on its mesh
     fvcom = fvcom_months(str(root / "fvcom_sim"))
     runs["fvcom"] = dict(
         sim_dir=fvcom, variables={"Temperature": "temp", "Velocity": "u"},
-        climatology={name: {"start": 2012, "end": 2013, "surface": True} for name in ("Temperature", "Velocity")},
+        climatology={
+            "Temperature": {"start": 2012, "end": 2013, "surface": True, "bottom": True, "water_column": "integral"},
+            "Velocity": {"start": 2012, "end": 2013, "surface": True, "water_column": "mean"},
+        },
     )
     found = {}
     with pytest.MonkeyPatch.context() as patch:

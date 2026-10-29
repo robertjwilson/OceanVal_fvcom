@@ -73,8 +73,9 @@ LABELS = {
 # what the window says of what Analyze cannot yet work out of raw FVCOM output
 FVCOM_NOT_YET = "not yet available for FVCOM output."
 FVCOM_NOTE = (
-    "This is raw FVCOM output: so far Analyze can only map its climatology at the surface. "
-    "The other analyses, and the bottom and water column, are " + FVCOM_NOT_YET
+    "This is raw FVCOM output: so far Analyze can only map its climatology, at the surface, the bottom or through "
+    "the water column, whose cell thickness is worked out from the sigma levels (siglev), h and zeta. "
+    "The other analyses are " + FVCOM_NOT_YET
 )
 
 
@@ -238,7 +239,7 @@ class AnalyzeSteps:
                     picker=picker,
                     presets=preset_names,
                     ersem=ersem,
-                    # raw FVCOM output: only a climatology at the surface can be worked out of it so far
+                    # raw FVCOM output: only a climatology can be worked out of it so far
                     fvcom=any(stream.get("fvcom") for stream in found),
                 )
                 if not self._analyze_missing_set:
@@ -549,7 +550,7 @@ class AnalyzeSteps:
             available = (self.analyze_found or {}).get("picker", {}).get("available", [])
             chosen, thickness, errors = analysis_forms.check_climatology(
                 form, placed, self._known_years(found), set(available), self.cwd, LABELS[kind],
-                series=kind == "long_term",
+                series=kind == "long_term", fvcom=self._analyze_fvcom(),
             )
             if errors:
                 return None, errors
@@ -582,23 +583,12 @@ class AnalyzeSteps:
 
     def _fvcom_errors(self, kind, chosen):
         """The errors of a pop-out whose choices Analyze cannot yet work out
-        of raw FVCOM output: any but the climatology, and its surface only.
-        Called with the lock held."""
-        if not self._analyze_fvcom():
+        of raw FVCOM output: any but the climatology. Called with the lock
+        held."""
+        if not self._analyze_fvcom() or kind == "climatology":
             return {}
-        if kind != "climatology":
-            verb = "is" if kind == "phenology" else "are"
-            return {"rows": f"{LABELS[kind][0].upper()}{LABELS[kind][1:]} {verb} {FVCOM_NOT_YET}"}
-        errors = {}
-        for name, entry in ((chosen or {}).get("rows") or {}).items():
-            found = {}
-            if entry.get("bottom"):
-                found["bottom"] = f"The bottom is {FVCOM_NOT_YET}"
-            if entry.get("water_column"):
-                found["water_column"] = f"The water column is {FVCOM_NOT_YET}"
-            if found:
-                errors[name] = found
-        return errors
+        verb = "is" if kind == "phenology" else "are"
+        return {"rows": f"{LABELS[kind][0].upper()}{LABELS[kind][1:]} {verb} {FVCOM_NOT_YET}"}
 
     def analyze_option(self, kind, form):
         """A pop-out's Confirm, with its boxes. The time series' also hold the
@@ -687,8 +677,8 @@ class AnalyzeSteps:
                 if chosen[kind] and self._fvcom_errors(kind, chosen[kind]):
                     return 400, {
                         "ok": False,
-                        "error": f"Only the climatology at the surface can be worked out of FVCOM output so far: "
-                        f"remove the {LABELS[kind]}, or untick its bottom and water column.",
+                        "error": f"Only the climatology can be worked out of FVCOM output so far: "
+                        f"remove the {LABELS[kind]}.",
                     }
             if not any(chosen[kind] for kind in KINDS):
                 return 400, {
@@ -897,7 +887,7 @@ class AnalyzeSteps:
             "missing_probed": self.analyze_missing_probed,
             "figure_code": self.analyze_figure_code,
             "nemo_ersem": bool((found or {}).get("ersem")),
-            # raw FVCOM output, of which only the surface climatology can be worked out so far
+            # raw FVCOM output, of which only the climatology can be worked out so far
             "fvcom": self._analyze_fvcom(),
             "fvcom_note": FVCOM_NOTE,
             "daily": time_resolution.DAILY,

@@ -352,22 +352,31 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   has CDO write one level of one time step of one variable first and opens only that, `analysis.peak` reads a band of rows at a time,
   `analysis_series.station_values` a year of times at a time; `tests/test_sim_compare.py::TestSameGridIsLookedAtLightly`
   fails if a data variable is read).
-- **Raw FVCOM output in Analyze** (so far the **surface climatology only**; the user's first step, 2026-10-29): CDO cannot read FVCOM's
-  mesh, so `analysis.streams` marks such a stream `"fvcom"` (`_variables_of` → `fvcom_climatology.variables`: the variables on `node`/`nele`,
-  not `viewer_mesh.MESH_VARIABLES`), `locate_rows` sets `row["fvcom"]` and reads its times with `index_times(fvcom=True)`, and refuses in one
-  error everything else (`analysis.fvcom_unsupported`/`fvcom_text`: phenology, long-term, seasonal, map changes, transects, the bottom and
-  water column: "not yet available for FVCOM output"). `_work_out` gets the layer from `_fvcom_climatology` → **`oceanval/fvcom_climatology.py`**:
-  netCDF4 reads `siglay` 0 a block of times at a time (`BLOCK_VALUES`; the one exception to "only nctoolkit/CDO reads model output", and
-  never a whole file), sums per (year, month) and cell, each year's monthly mean then the mean of each month, as `climatology_of`; `cores`
-  processes run the file **as a script by path** (`python -I`, importing no OceanVal at module level, as a spawned worker of the package would
-  re-run the user's script). Its results keep the usual names (`<key>_surface_monthly/annual.nc`) on `(time, node|nele)` with the mesh
-  (`lon`, `lat`, `nv`, ...) and `month`, and the layer has `"mesh"`; `info["fvcom"]`. **`oceanval/mesh_maps.py`** (`mesh_plot`, `mesh_panel_plot`,
-  pyfvcom2's tripcolor of `Triangulation(lon, lat, nv.T - 1)`: gouraud on nodes, flat on elements, a triangle with a value missing masked,
-  land beneath, true proportions, plain axes for a mesh in metres) draws them: `analysis_plots.annual_map`/`monthly_maps` write scripts
-  that import it (a third OceanVal import allowed in copied scripts). The window: `state.analyze.fvcom`/`fvcom_note`, the other tiles disabled
-  and Bottom/Water column saying "Not yet available for FVCOM output" (`fvcomNotYet`), `App._fvcom_errors` refusing them server side,
-  the dates check with `fvcom: True`; `missing_probe` reads FVCOM's first sigma layer. `compare_simulations` still refuses FVCOM
-  (`locate_rows(refuse_fvcom=)`). Tests: `tests/test_fvcom_analysis.py` (`viewer_simulations.fvcom_months`), the `fvcom` case of
+- **Raw FVCOM output in Analyze** (so far the **climatology only**, at the surface, the bottom and through the water column; the user's
+  first steps, 2026-10-29): CDO cannot read FVCOM's mesh, so `analysis.streams` marks such a stream `"fvcom"` (`_variables_of` →
+  `fvcom_climatology.variables`: the variables on `node`/`nele`, not `viewer_mesh.MESH_VARIABLES`), `locate_rows` sets `row["fvcom"]` and
+  reads its times with `index_times(fvcom=True)`, and refuses in one error everything else (`analysis.fvcom_unsupported`/`fvcom_text`:
+  phenology, long-term, seasonal, map changes, transects: "not yet available for FVCOM output"), and the water column of a variable with a
+  part not on `siglay` (`fvcom_climatology.not_layered`: on `siglev`, as `km`, or 2-D, as `zeta` in `temp+zeta`). `_work_out` gets each layer
+  from `_fvcom_climatology` → **`oceanval/fvcom_climatology.py`**: netCDF4 reads a block of times at a time (`BLOCK_VALUES`; the one
+  exception to "only nctoolkit/CDO reads model output", and never a whole file) and takes each time step to its layer as nctoolkit would:
+  the surface is `siglay` 0, the bottom the deepest layer with a value of each part (`_deepest`, CDO's `bottomvalue`; the layers above are
+  read only while some cells are missing), the water column `vertical_integration`'s `sum(x·dz)` and `vertical_mean`'s that over `sum(dz)`
+  of the layers with a value (`_column`). **The thickness is never asked for** (`analyze()` checks `require_thickness` after `locate_rows`,
+  without the FVCOM rows; `check_climatology(fvcom=)` in the window): `dz` = the layer's share of `siglev` (`siglev_center` on the elements
+  if there) × (`h` + `zeta`) **at each time step** (`_shares` × `_depth_of_water`, not the first time's, as tides move `zeta`; no `zeta` is 0; on the
+  elements the mean of the three nodes' depth, through `nv`; not above 0 is a dry cell, missing). Then sums per (year, month) and cell, each
+  year's monthly mean then the mean of each month, as `climatology_of`; `cores` processes run the file **as a script by path** (`python -I`,
+  importing no OceanVal at module level, as a spawned worker of the package would re-run the user's script; a job carries its `layer`).
+  Its results keep the usual names (`<key>_<layer>_monthly/annual.nc`, the integral's units by `integral_units`) on `(time, node|nele)` with
+  the mesh (`lon`, `lat`, `nv`, ...) and `month`, and the layer has `"mesh"`; `info["fvcom"]`. **`oceanval/mesh_maps.py`** (`mesh_plot`,
+  `mesh_panel_plot`, pyfvcom2's tripcolor of `Triangulation(lon, lat, nv.T - 1)`: gouraud on nodes, flat on elements, a triangle with a value
+  missing masked, land beneath, true proportions, plain axes for a mesh in metres) draws them: `analysis_plots.annual_map`/`monthly_maps`
+  write scripts that import it (a third OceanVal import allowed in copied scripts). The window: `state.analyze.fvcom`/`fvcom_note`, the other
+  tiles disabled (`fvcomNotYet`, `App._fvcom_errors` refusing them server side), the climatology's thickness row hidden and
+  `#clim-fvcom-thickness` saying how it is worked out (`refreshThickness`), the dates check with `fvcom: True`; `missing_probe` reads
+  FVCOM's first sigma layer. `compare_simulations` still refuses FVCOM (`locate_rows(refuse_fvcom=)`). Tests: `tests/test_fvcom_analysis.py`
+  (`viewer_simulations.fvcom_months`; values worked out by hand, uneven `siglev` and a changing `zeta` included), the `fvcom` case of
   `test_analysis_plots.py`.
 - **Every netCDF read in the window's own process holds `oceanval.netcdf_lock.LOCK`** (`analysis._FILE_READ_LOCK` is it):
   netCDF-C/HDF5 are not thread-safe and xarray gives each file a lock of its own, so two of the window's threads opening

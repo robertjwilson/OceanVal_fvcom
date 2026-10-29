@@ -1,7 +1,7 @@
 """Analyze with raw FVCOM output (see oceanval.fvcom_climatology and
-oceanval.mesh_maps): so far only the climatology at the surface is worked out,
-on the mesh itself, and everything else is refused, by analyze() and by the
-window."""
+oceanval.mesh_maps): so far only the climatology (at the surface, the bottom
+and through the water column) is worked out, on the mesh itself, and
+everything else is refused, by analyze() and by the window."""
 
 import ast
 import datetime
@@ -141,6 +141,158 @@ class TestClimatology:
         assert variables["zeta"]["levels"] == 1
 
 
+def simulation_files(sim):
+    return sorted(os.path.join(root, name) for root, _, names in os.walk(sim) for name in names)
+
+
+def depth_of_water():
+    """h + zeta of fvcom_file on its nodes, and on its elements (the mean of their nodes')."""
+    lon, _, nv = fvcom_mesh()
+    depth = (20 + 200 * (lon + 5)).astype("float32").astype("float64") + 0.5
+    return depth, depth[nv - 1].mean(axis=0)
+
+
+def mean_of(found, month):
+    sums, counts = found[month]
+    with np.errstate(invalid="ignore"):
+        return np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
+
+
+class TestBottomAndWaterColumn:
+    """fvcom_file's temp is 10 + lon + the layer + the day, on five layers of
+    the same thickness, h is 20 + 200 (lon + 5) and zeta 0.5."""
+
+    def test_the_bottom_and_water_column_with_no_thickness(self, fvcom_sim, tmp_path, no_report):
+        years = {"start": 2012, "end": 2013}
+        analyze(
+            fvcom_sim, tmp_path / "out", variables={"Temperature": "temp", "Heat": "temp", "Velocity": "u"},
+            climatology={
+                "Temperature": dict(years, bottom=True, water_column="mean"),
+                "Heat": dict(years, water_column="integral"),
+                "Velocity": dict(years, bottom=True, water_column="integral"),
+            },
+        )
+        temperature, heat, velocity = no_report[-1]["variables"]
+        results = results_of(tmp_path / "out")
+        lon, _, _ = fvcom_mesh()
+        _, climatology, _ = expected_temperature(lon)
+        on_nodes, on_elements = depth_of_water()
+
+        def values(entry, layer, key):
+            saved = entry["climatology"]["layers"][layer]
+            with xr.open_dataset(os.path.join(results, saved["monthly"])) as ds:
+                return saved, ds[key].values, ds[key].attrs["long_name"]
+
+        saved, bottom, long_name = values(temperature, "bottom", "temperature")
+        assert saved["mesh"] == "node" and saved["title"] == "Bottom" and long_name == "Temperature, bottom"
+        assert np.allclose(bottom, climatology + 4, atol=1e-4)
+        saved, mean, _ = values(temperature, "mean", "temperature")
+        assert saved["units"] == "degrees_C" and np.allclose(mean, climatology + 2, atol=1e-4)
+        saved, integral, long_name = values(heat, "integral", "heat")
+        assert saved["units"] == analysis.integral_units("degrees_C") == "degrees_C m"
+        assert long_name == "Heat, water column: depth integral"
+        assert np.allclose(integral, (climatology + 2) * on_nodes, rtol=1e-5)
+        # u is each element's number in every layer
+        saved, integral, _ = values(velocity, "integral", "velocity")
+        assert saved["mesh"] == "nele" and saved["units"] == "meters s-1 m"
+        assert np.allclose(integral, np.arange(len(on_elements)) * on_elements, rtol=1e-5)
+        assert np.allclose(values(velocity, "bottom", "velocity")[1], np.arange(len(on_elements)))
+
+    def test_each_layer_is_weighted_by_its_thickness_at_each_time(self, tmp_path):
+        import netCDF4
+
+        path = fvcom_file(str(tmp_path / "uneven.nc"), n_times=3)
+        levels = np.array([0.0, -0.1, -0.3, -0.6, -0.8, -1.0])
+        zeta = np.array([0.0, 1.0, 5.0])
+        with netCDF4.Dataset(path, "a") as ds:
+            nodes = ds.dimensions["node"].size
+            ds.variables["siglev"][:] = np.repeat(levels[:, None], nodes, axis=1)
+            ds.variables["zeta"][:] = np.repeat(zeta[:, None], nodes, axis=1)
+            h = ds.variables["h"][:].astype("float64")
+            temp = ds.variables["temp"][:].astype("float64")
+        shares = -np.diff(levels)
+        thickness = shares[None, :, None] * (h[None, None, :] + zeta[:, None, None])
+        found = {
+            layer: mean_of(fvcom_climatology.file_sums(path, ["temp"], [2012, 2012], layer=layer), (2012, 1))
+            for layer in ("mean", "integral")
+        }
+        # the mean of each time's column: the thickness changes with zeta, but not the shares
+        assert np.allclose(found["mean"], (temp * shares[None, :, None]).sum(axis=1).mean(axis=0), rtol=1e-6)
+        assert np.allclose(found["integral"], (temp * thickness).sum(axis=1).mean(axis=0), rtol=1e-6)
+        # not the even split
+        assert not np.allclose(found["mean"], temp.mean(axis=(0, 1)))
+
+    def test_what_is_missing_is_left_out(self, tmp_path):
+        import netCDF4
+
+        path = fvcom_file(str(tmp_path / "gaps.nc"), n_times=2)
+        with netCDF4.Dataset(path, "a") as ds:
+            temp = ds.variables["temp"][:]
+            temp[:, 0, 0] = np.ma.masked  # the top layer of node 0
+            temp[:, :, 1] = np.ma.masked  # every layer of node 1
+            temp[:, 4, 2] = np.ma.masked  # the bottom layer of node 2
+            ds.variables["temp"][:] = temp
+            h = ds.variables["h"][:].astype("float64")
+            full = ds.variables["temp"][:].data.astype("float64")
+        lon, _, _ = fvcom_mesh()
+
+        def layer(name):
+            return mean_of(fvcom_climatology.file_sums(path, ["temp"], [2012, 2012], layer=name), (2012, 1))
+
+        top = 10 + lon + 0.5  # the mean of days 0 and 1
+        mean, integral, bottom = layer("mean"), layer("integral"), layer("bottom")
+        # node 0: the four layers below the top, each a fifth of the depth
+        assert np.isclose(mean[0], top[0] + 2.5) and np.isclose(integral[0], (top[0] + 2.5) * 0.8 * (h[0] + 0.5))
+        assert np.isnan(mean[1]) and np.isnan(integral[1]) and np.isnan(bottom[1])
+        # node 2: the deepest layer with a value
+        assert np.isclose(bottom[2], top[2] + 3) and np.isclose(bottom[3], top[3] + 4)
+        assert np.isclose(mean[3], top[3] + 2) and np.isfinite(full).all()
+
+    def test_more_cores_give_the_same(self, fvcom_sim):
+        files = simulation_files(fvcom_sim)
+        for layer in ("bottom", "integral"):
+            one = fvcom_climatology.monthly_sums(files, ["temp"], [2012, 2013], cores=1, layer=layer)
+            two = fvcom_climatology.monthly_sums(files, ["temp"], [2012, 2013], cores=2, layer=layer)
+            assert sorted(one) == sorted(two) == sorted(MONTHS)
+            for month in one:
+                assert np.allclose(one[month][0], two[month][0]) and np.array_equal(one[month][1], two[month][1])
+
+    def test_a_sum_with_a_surface_variable(self, fvcom_sim, tmp_path, no_report):
+        years = {"start": 2012, "end": 2013}
+        # the bottom of each part, added, as CDO takes it
+        analyze(fvcom_sim, tmp_path / "out", variables={"Plus": "temp+zeta"},
+                climatology={"Plus": dict(years, bottom=True)})
+        saved = no_report[-1]["variables"][0]["climatology"]["layers"]["bottom"]
+        lon, _, _ = fvcom_mesh()
+        with xr.open_dataset(os.path.join(results_of(tmp_path / "out"), saved["monthly"])) as ds:
+            assert np.allclose(ds["plus"].values, expected_temperature(lon)[1] + 4.5, atol=1e-4)
+        # but zeta has no water column
+        with pytest.raises(ValueError, match="the water column needs every part of it on the sigma layers"):
+            analyze(fvcom_sim, tmp_path / "again", variables={"Plus": "temp+zeta"},
+                    climatology={"Plus": dict(years, water_column="mean")})
+
+    def test_what_has_no_water_column_is_refused(self, fvcom_sim, tmp_path, no_report):
+        import netCDF4
+
+        for path in simulation_files(fvcom_sim):
+            with netCDF4.Dataset(path, "a") as ds:
+                km = ds.createVariable("km", "f4", ("time", "siglev", "node"))
+                km[:] = 1.0
+                km.units = "m2 s-1"
+        years = {"start": 2012, "end": 2013}
+        with pytest.raises(ValueError, match=r"km is not \(on the sigma levels, siglev"):
+            analyze(fvcom_sim, tmp_path / "out", variables={"Viscosity": "km"},
+                    climatology={"Viscosity": dict(years, water_column="integral")})
+        with pytest.raises(ValueError, match="has only one vertical level"):
+            analyze(fvcom_sim, tmp_path / "out", variables={"Elevation": "zeta"},
+                    climatology={"Elevation": dict(years, bottom=True)})
+        assert not os.path.exists(os.path.join(str(tmp_path / "out"), analysis.FOLDER))
+        # the bottom of what is on the sigma levels is the seabed's
+        analyze(fvcom_sim, tmp_path / "out", variables={"Viscosity": "km"},
+                climatology={"Viscosity": dict(years, bottom=True)})
+        assert no_report[-1]["variables"][0]["climatology"]["layers"]["bottom"]["mesh"] == "node"
+
+
 class TestEverythingElseIsRefused:
     def test_analyze_says_what_is_not_yet_available(self, fvcom_sim, tmp_path, no_report):
         years = {"start": 2012, "end": 2012}
@@ -154,13 +306,13 @@ class TestEverythingElseIsRefused:
                 map_changes={"Temperature": {"historical": years, "future": [{"start": 2013, "end": 2013}],
                                              "plot": "absolute", "change": "absolute", "surface": True}},
                 transects={"Temperature": [{"start": [-5.0, 50.5], "end": [-4.0, 50.5], "climatology": years}]},
-                thickness="z_level",
             )
         text = str(raised.value)
-        for what in ("phenology", "long-term time series", "seasonal cycles", "map temporal changes", "transects",
-                     "the climatology at the bottom", "water column (vertical mean)"):
+        for what in ("phenology", "long-term time series", "seasonal cycles", "map temporal changes", "transects"):
             assert what in text
-        assert "not yet available for FVCOM output" in text and "climatology at the surface" in text
+        # the climatology's bottom and water column can be worked out
+        assert "bottom is" not in text and "vertical mean" not in text
+        assert "not yet available for FVCOM output" in text and "only work out a climatology of FVCOM output" in text
         assert not os.path.exists(os.path.join(str(tmp_path / "out"), analysis.FOLDER))
 
     def test_compare_simulations_still_refuses_fvcom(self, fvcom_sim, tmp_path, no_report):
@@ -251,32 +403,29 @@ def to_options(app):
 
 
 class TestWindow:
-    def test_only_the_surface_climatology_can_be_chosen(self, app, fvcom_sim, monkeypatch):
+    def test_only_the_climatology_can_be_chosen(self, app, fvcom_sim, monkeypatch):
         started = []
         monkeypatch.setattr(app, "start_run", lambda args, label: started.append(args))
         state = to_options(app)
-        assert state["fvcom"] is True and "only map its climatology at the surface" in state["fvcom_note"]
+        assert state["fvcom"] is True and "only map its climatology, at the surface, the bottom" in state["fvcom_note"]
         # the dates are checked as matchup(fvcom=True) reads them
         assert app.analyze_check.request["fvcom"] is True and app.analyze_check.status == "done"
         years = {"use": True, "start": "2012", "end": "2013"}
         status, reply = post(app, "/api/analyze_option", {"kind": "phenology", "form": {"rows": {"Temperature": years}}})
         assert status == 400 and "Phenology is not yet available for FVCOM output." == reply["errors"]["rows"]
-        column = {"rows": {"Temperature": dict(years, surface=True, water_column=True, how="mean")}, "thickness": "z_level"}
-        status, reply = post(app, "/api/analyze_option", {"kind": "climatology", "form": column})
-        assert status == 400 and reply["errors"]["Temperature"] == {
-            "water_column": "The water column is not yet available for FVCOM output."
-        }
-        surface = {"rows": {"Temperature": dict(years, surface=True)}, "thickness": ""}
-        assert post(app, "/api/analyze_option", {"kind": "climatology", "form": surface}) == (200, {"ok": True})
+        # the bottom and the water column, with no thickness asked for: it is worked out from the mesh
+        column = {"rows": {"Temperature": dict(years, surface=True, bottom=True, water_column=True, how="mean")},
+                  "thickness": ""}
+        assert post(app, "/api/analyze_option", {"kind": "climatology", "form": column}) == (200, {"ok": True})
         for kind, form in (("cores", {"cores": "1"}), ("missing", {"from": "", "to": ""}), ("figure_code", {"choice": "no"})):
             assert post(app, "/api/analyze_option", {"kind": kind, "form": form})[0] == 200
         assert post(app, "/api/analyze_run") == (200, {"ok": True})
         script = os.path.join(app.cwd, "analysis.py")
         call = ast.parse(open(script).read()).body[-1].value
         given = {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords}
-        assert given["climatology"] == {"Temperature": {"start": 2012, "end": 2013, "surface": True, "bottom": False,
-                                                        "water_column": None}}
-        assert given["phenology"] is None and started
+        assert given["climatology"] == {"Temperature": {"start": 2012, "end": 2013, "surface": True, "bottom": True,
+                                                        "water_column": "mean"}}
+        assert given["phenology"] is None and given["thickness"] is None and started
 
 
 def test_the_other_analyses_are_greyed_out_in_a_browser(browser, tmp_path):
@@ -299,9 +448,13 @@ def test_the_other_analyses_are_greyed_out_in_a_browser(browser, tmp_path):
         page.click("#ao-climatology")
         page.wait_for_selector("#clim-dialog:not([hidden])")
         cells = page.locator("#clim-body tr").first.locator("td")
-        assert "Not yet available for FVCOM output" in cells.nth(4).inner_text()
-        assert "Not yet available for FVCOM output" in cells.nth(5).inner_text()
-        assert page.is_hidden("#clim-thickness-row")
+        # the bottom and the water column can be chosen, and the thickness is not asked for
+        bottom, water = (cells.nth(n).locator("input[type=checkbox]").first for n in (4, 5))
+        assert bottom.is_enabled() and water.is_enabled()
+        assert "Not yet available" not in cells.nth(4).inner_text() + cells.nth(5).inner_text()
+        water.check()
+        assert page.is_hidden("#clim-thickness-row") and page.is_visible("#clim-fvcom-thickness")
+        assert "siglev" in page.inner_text("#clim-fvcom-thickness")
         assert errors == []
     finally:
         app.close()

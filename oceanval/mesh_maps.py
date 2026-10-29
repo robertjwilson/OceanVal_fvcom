@@ -70,6 +70,8 @@ def _draw(ax, mesh, values, where, limits, colours, geographic):
     from matplotlib.tri import Triangulation
 
     triangles = mesh.triangles
+    # pub_plot's own default
+    colours = "viridis" if colours == "auto" else colours
     if where == "nele":
         bad = ~np.isfinite(values)
     else:
@@ -138,11 +140,12 @@ def _mesh(path):
 
 
 def mesh_plot(path, var, time=0, robust=True, limits=None, legend=None, title=None, colours="viridis",
-              grid_labels=True, fig=None, gs=None, size=None):
+              grid_labels=True, fig=None, gs=None, size=None, legend_position="right"):
     """Map var in the FVCOM file at path, at its time-th time, as
     nctoolkit's pub_plot maps a grid: robust colours from the 2nd to the 98th
-    percentile, or limits, [low, high]; legend the colour bar's label; fig and
-    gs a figure and a subplot spec to draw it in. Returns the axes."""
+    percentile, or limits, [low, high]; legend the colour bar's label, and
+    legend_position None for no colour bar; fig and gs a figure and a subplot
+    spec to draw it in. Returns the axes."""
     import matplotlib.pyplot as plt
 
     mesh = _mesh(path)
@@ -158,7 +161,7 @@ def mesh_plot(path, var, time=0, robust=True, limits=None, legend=None, title=No
         gs = fig.add_gridspec(1, 1)[0, 0]
     ax = _map_axes(fig, gs, mesh, grid_labels)
     drawn = _draw(ax, mesh, values, where, limits, colours, not mesh.cartesian)
-    if drawn is not None:
+    if drawn is not None and legend_position is not None:
         bar = fig.colorbar(drawn, ax=ax, extend=_extend(values, limits), shrink=0.8)
         if legend:
             bar.set_label(legend)

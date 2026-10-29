@@ -73,9 +73,9 @@ LABELS = {
 # what the window says of what Analyze cannot yet work out of raw FVCOM output
 FVCOM_NOT_YET = "not yet available for FVCOM output."
 FVCOM_NOTE = (
-    "This is raw FVCOM output: so far Analyze can only map its climatology, at the surface, the bottom or through "
-    "the water column, whose cell thickness is worked out from the sigma levels (siglev), h and zeta. "
-    "The other analyses are " + FVCOM_NOT_YET
+    "This is raw FVCOM output, mapped on its own mesh: the cell thickness of the water column is worked out from "
+    "the sigma levels (siglev), h and zeta, and the spatial means are weighted by the areas of the mesh's cells. "
+    "Transects are " + FVCOM_NOT_YET
 )
 
 
@@ -558,7 +558,7 @@ class AnalyzeSteps:
         if kind == "map_changes":
             available = (self.analyze_found or {}).get("picker", {}).get("available", [])
             chosen, thickness, errors = analysis_forms.check_map_changes(
-                form, placed, self._known_years(found), set(available), self.cwd
+                form, placed, self._known_years(found), set(available), self.cwd, fvcom=self._analyze_fvcom()
             )
             if errors:
                 return None, errors
@@ -583,9 +583,9 @@ class AnalyzeSteps:
 
     def _fvcom_errors(self, kind, chosen):
         """The errors of a pop-out whose choices Analyze cannot yet work out
-        of raw FVCOM output: any but the climatology. Called with the lock
-        held."""
-        if not self._analyze_fvcom() or kind == "climatology":
+        of raw FVCOM output: the transects (see analysis.FVCOM_TEXT). Called
+        with the lock held."""
+        if not self._analyze_fvcom() or kind not in analysis.FVCOM_TEXT:
             return {}
         verb = "is" if kind == "phenology" else "are"
         return {"rows": f"{LABELS[kind][0].upper()}{LABELS[kind][1:]} {verb} {FVCOM_NOT_YET}"}
@@ -677,8 +677,8 @@ class AnalyzeSteps:
                 if chosen[kind] and self._fvcom_errors(kind, chosen[kind]):
                     return 400, {
                         "ok": False,
-                        "error": f"Only the climatology can be worked out of FVCOM output so far: "
-                        f"remove the {LABELS[kind]}.",
+                        "error": f"The {LABELS[kind]} {'is' if kind == 'phenology' else 'are'} {FVCOM_NOT_YET} "
+                        f"Remove the {LABELS[kind]}.",
                     }
             if not any(chosen[kind] for kind in KINDS):
                 return 400, {

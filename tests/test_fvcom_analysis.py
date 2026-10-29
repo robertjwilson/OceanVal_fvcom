@@ -1,7 +1,9 @@
-"""Analyze with raw FVCOM output (see oceanval.fvcom_climatology and
-oceanval.mesh_maps): so far only the climatology (at the surface, the bottom
-and through the water column) is worked out, on the mesh itself, and
-everything else is refused, by analyze() and by the window."""
+"""Analyze with raw FVCOM output (see oceanval.fvcom_climatology,
+oceanval.mesh_means and oceanval.mesh_maps): the climatology (at the surface,
+the bottom and through the water column), the phenology, the long-term and
+seasonal series and the map changes are worked out on the mesh itself, the
+spatial means weighted by the areas of its cells; the transects are refused,
+by analyze() and by the window."""
 
 import ast
 import datetime
@@ -16,10 +18,10 @@ import pytest  # noqa: E402
 import xarray as xr  # noqa: E402
 
 import oceanval  # noqa: E402
-from oceanval import analysis, fvcom_climatology, mesh_maps, missing_probe  # noqa: E402
+from oceanval import analysis, analysis_forms, fvcom_climatology, mesh_maps, mesh_means, missing_probe  # noqa: E402
 from oceanval.app import App  # noqa: E402
 from test_app import get_json, leftover_dir, post, wait_for  # noqa: E402, F401 (leftover_dir is autouse)
-from viewer_simulations import fvcom_file, fvcom_mesh, fvcom_months  # noqa: E402
+from viewer_simulations import fvcom_file, fvcom_mesh, fvcom_months, fvcom_simulation  # noqa: E402
 
 MONTHS = ((2012, 1), (2012, 2), (2012, 3), (2012, 4), (2013, 1), (2013, 2))
 SURFACE = {"start": 2012, "end": 2013, "surface": True}
@@ -293,7 +295,289 @@ class TestBottomAndWaterColumn:
         assert no_report[-1]["variables"][0]["climatology"]["layers"]["bottom"]["mesh"] == "node"
 
 
-class TestEverythingElseIsRefused:
+EARTH_M = 6_371_000.0
+
+
+def plane_areas(lon, lat, nv):
+    """The area of each triangle of the mesh in square metres, by hand: flat,
+    a degree of longitude cos(latitude) of one of latitude, which is close
+    enough for triangles a tenth of a degree across."""
+    corners_lon, corners_lat = lon[nv - 1], lat[nv - 1]
+    scale = np.radians(1) * EARTH_M
+    x = (corners_lon - corners_lon[0]) * scale * np.cos(np.radians(corners_lat.mean(axis=0)))
+    y = (corners_lat - corners_lat[0]) * scale
+    return 0.5 * np.abs(x[1] * y[2] - x[2] * y[1])
+
+
+def hand_node_areas(lon, lat, nv):
+    areas = np.zeros(len(lon))
+    for corner in range(3):
+        np.add.at(areas, nv[corner] - 1, plane_areas(lon, lat, nv) / 3)
+    return areas
+
+
+def stored(values):
+    """values as fvcom_file stores them, as float32."""
+    return np.asarray(values, dtype="float32").astype("float64")
+
+
+def series_of(out, key, layer, kind):
+    import pandas as pd
+
+    return pd.read_csv(os.path.join(results_of(out), f"{key}_{layer}_{kind}.csv"))
+
+
+def write_regions(path):
+    """A regions file on a grid of 0.3 degree cells whose sides are clear of
+    the mesh's nodes: "West", where the cells' centres are west of 4.5W, and
+    "Nowhere", out of the mesh."""
+    lon = -5.95 + 0.3 * np.arange(10)
+    lat = 48.95 + 0.3 * np.arange(10)
+    west = np.where(lon[None, :] < -4.5, 1.0, np.nan) * np.ones((len(lat), 1))
+    nowhere = np.full((len(lat), len(lon)), np.nan)
+    nowhere[0, 0] = 1.0
+    xr.Dataset(
+        {"west": (("lat", "lon"), west, {"long_name": "West"}),
+         "nowhere": (("lat", "lon"), nowhere, {"long_name": "Nowhere"})},
+        coords={"lat": ("lat", lat, {"units": "degrees_north"}), "lon": ("lon", lon, {"units": "degrees_east"})},
+    ).to_netcdf(path)
+    return path
+
+
+class TestAreas:
+    def test_a_triangle_in_the_plane_and_on_the_sphere(self):
+        assert np.isclose(mesh_means.triangle_areas([0, 3, 0], [0, 0, 4], np.array([[0, 1, 2]]), cartesian=True)[0], 6)
+        # an eighth of the globe
+        octant = mesh_means.triangle_areas([0, 90, 0], [0, 0, 90], np.array([[0, 1, 2]]))[0]
+        assert np.isclose(octant, 4 * np.pi * EARTH_M**2 / 8)
+
+    def test_the_mesh_s_areas(self):
+        lon, lat, nv = fvcom_mesh()
+        areas = mesh_means.triangle_areas(lon, lat, nv.T - 1)
+        assert np.allclose(areas, plane_areas(lon, lat, nv), rtol=1e-3)
+        nodes = mesh_means.node_areas(areas, nv.T - 1, len(lon))
+        # the control volumes of the nodes cover the mesh, as FVCOM's art1 does
+        assert np.isclose(nodes.sum(), areas.sum()) and np.allclose(nodes, hand_node_areas(lon, lat, nv), rtol=1e-3)
+        # a node on the edge of the mesh has less of it than one inside
+        assert nodes.min() < 0.5 * nodes.max()
+
+    def test_the_cells_of_a_file(self, tmp_path):
+        path = fvcom_file(str(tmp_path / "one.nc"), n_times=1)
+        lon, lat, nv = fvcom_mesh()
+        nodes, elements = mesh_means.MeshCells(path, "node"), mesh_means.MeshCells(path, "nele")
+        assert np.isclose(nodes.areas.sum(), elements.areas.sum())
+        assert np.allclose(elements.lon, stored(lon)[nv - 1].mean(axis=0), atol=1e-5)
+        # the sides of the triangles, about 7 and 11 km, and their diagonals
+        assert 5 < np.nanmin(nodes.size) and np.nanmax(nodes.size) < 15
+        flat = mesh_means.MeshCells(fvcom_file(str(tmp_path / "flat.nc"), n_times=1, cartesian=True), "node")
+        assert flat.cartesian and np.isclose(flat.areas.sum(), 0.1 * 70000 * 0.1 * 111000 * (100 - 25), rtol=1e-4)
+
+    def test_a_weighted_mean(self):
+        fields = np.array([[1.0, 2.0, np.nan], [np.nan, np.nan, np.nan]])
+        assert np.allclose(mesh_means.weighted_mean(fields, np.array([1.0, 3.0, 5.0]))[0], 1.75)
+        assert np.isnan(mesh_means.weighted_mean(fields, np.array([1.0, 3.0, 5.0]))[1])
+
+
+class TestSpatialMeans:
+    @pytest.fixture
+    def cells(self, tmp_path):
+        return mesh_means.MeshCells(fvcom_file(str(tmp_path / "one.nc"), n_times=1), "node")
+
+    def test_the_domain_and_a_box(self, cells):
+        lon, lat, nv = fvcom_mesh()
+        weights = hand_node_areas(lon, lat, nv)
+        series = mesh_means.Series(cells, lon_lim=[-5.0, -4.65], lat_lim=[50.0, 51.0])
+        series.add((2012, 1), cells.lon)
+        (row,), notes = series.region_rows()
+        west = lon < -4.65
+        assert row[:4] == ("domain", "Full Domain", 2012, 1) and notes == []
+        assert np.isclose(row[4], (weights * lon)[west].sum() / weights[west].sum(), atol=1e-5)
+        whole = mesh_means.Series(cells)
+        whole.add((2012, 1), cells.lon)
+        value = whole.region_rows()[0][0][4]
+        assert np.isclose(value, (weights * lon).sum() / weights.sum(), atol=1e-5)
+        # weighted by area, not the plain mean
+        assert not np.isclose(value, lon.mean(), atol=1e-4)
+
+    def test_regions(self, cells, tmp_path):
+        lon, lat, nv = fvcom_mesh()
+        weights = hand_node_areas(lon, lat, nv)
+        series = mesh_means.Series(cells, region_file=write_regions(str(tmp_path / "regions.nc")))
+        series.add((2012, 1), cells.lon)
+        rows, notes = series.region_rows()
+        west = lon < -4.6
+        assert [row[:2] for row in rows] == [("domain", "Full Domain"), ("region", "West")]
+        assert np.isclose(rows[1][4], (weights * lon)[west].sum() / weights[west].sum(), atol=1e-5)
+        assert notes == ["Nowhere has no cells in the model's domain, so it is left out."]
+
+    def test_stations(self, cells):
+        series = mesh_means.Series(cells, stations={"Near": [-4.52, 50.31]})
+        series.add((2012, 1), cells.lon)
+        rows, found = series.station_rows()
+        assert found["Near"]["lon"] == pytest.approx(-4.5, abs=1e-5) and found["Near"]["lat"] == pytest.approx(50.3, abs=1e-5)
+        assert rows == [("station", "Near", 2012, 1, pytest.approx(-4.5, abs=1e-5))]
+        # where the mesh is cut out, and far from it
+        for where in ([-4.1, 50.9], [0.0, 40.0]):
+            far = mesh_means.Series(cells, stations={"Far": where})
+            far.add((2012, 1), cells.lon)
+            with pytest.raises(ValueError, match="Far is .* km from the nearest cell of the FVCOM mesh with values"):
+                far.station_rows()
+
+    def test_a_station_is_in_the_nearest_cell_with_values(self, cells):
+        series = mesh_means.Series(cells, stations={"Near": [-4.52, 50.31]})
+        field = cells.lon.copy()
+        field[np.isclose(cells.lon, -4.5) & np.isclose(cells.lat, 50.3)] = np.nan
+        series.add((2012, 1), field)
+        _, found = series.station_rows()
+        assert found["Near"]["distance"] > 2
+
+
+class TestSeries:
+    """fvcom_sim's surface temp is 10 + lon + the days since 2012-01-01."""
+
+    def expected(self, weights, lon):
+        return {(year, month): 10 + (weights * stored(lon)).sum() / weights.sum() + days_of(year, month).mean()
+                for year, month in MONTHS}
+
+    def test_the_domain_series_are_weighted_by_area(self, fvcom_sim, tmp_path, no_report):
+        years = {"start": 2012, "end": 2013}
+        analyze(fvcom_sim, tmp_path / "out", climatology=None, long_term={"Temperature": dict(years, surface=True)},
+                seasonal={"Temperature": dict(years, surface=True, water_column="integral")})
+        entry = no_report[-1]["variables"][0]
+        assert entry["seasonal"]["layers"]["integral"]["units"] == "degrees_C m"
+        lon, lat, nv = fvcom_mesh()
+        expected = self.expected(hand_node_areas(lon, lat, nv), lon)
+        monthly = series_of(tmp_path / "out", "temperature", "surface", "seasonal")
+        assert set(monthly.kind) == {"domain"} and len(monthly) == 24
+        for row in monthly.itertuples():
+            if (row.year, row.month) in expected:
+                assert np.isclose(row.value, expected[(row.year, row.month)], atol=1e-3)
+            else:
+                assert np.isnan(row.value)
+        annual = series_of(tmp_path / "out", "temperature", "surface", "long_term")
+        assert list(annual.year) == [2012, 2013] and list(annual.months) == [4, 2]
+        assert np.isclose(annual.value[0], np.mean([expected[(2012, m)] for m in (1, 2, 3, 4)]), atol=1e-3)
+        assert entry["long_term"]["layers"]["surface"]["incomplete"] == [2012, 2013]
+        # the depth integral: the mean temperature of the column (2 above the surface's) times its depth
+        on_nodes, _ = depth_of_water()
+        integral = series_of(tmp_path / "out", "temperature", "integral", "seasonal").dropna()
+        weights = hand_node_areas(lon, lat, nv)
+        first = (weights * (10 + stored(lon) + days_of(2012, 1).mean() + 2) * on_nodes).sum() / weights.sum()
+        assert np.isclose(integral.value.iloc[0], first, rtol=1e-4)
+
+    def test_regions_and_stations(self, fvcom_sim, tmp_path, no_report):
+        years = {"start": 2012, "end": 2013}
+        analyze(fvcom_sim, tmp_path / "out", climatology=None, variables={"Velocity": "u"},
+                long_term={"Velocity": dict(years, surface=True)}, subregions=write_regions(str(tmp_path / "r.nc")),
+                stations={"Near": [-4.52, 50.31]})
+        entry = no_report[-1]["variables"][0]["long_term"]
+        assert entry["regions"] == ["West"] and set(entry["stations"]) == {"Near"}
+        assert any("Nowhere has no cells" in note for note in entry["notes"])
+        annual = series_of(tmp_path / "out", "velocity", "surface", "long_term")
+        assert set(annual.kind) == {"domain", "region", "station"}
+        # u is each element's number: the station's is that of the element nearest it
+        lon, lat, nv = fvcom_mesh()
+        centres = mesh_means._distance_km(-4.52, 50.31, lon[nv - 1].mean(axis=0), lat[nv - 1].mean(axis=0))
+        assert annual[annual.kind == "station"].value.iloc[0] == pytest.approx(float(np.argmin(centres)))
+
+    def test_more_cores_give_the_same(self, fvcom_sim, tmp_path, no_report):
+        years = {"start": 2012, "end": 2013}
+        found = []
+        for cores in (1, 2):
+            out = tmp_path / f"out{cores}"
+            oceanval.analyze(sim_dir=fvcom_sim, n_dirs_down=1, cores=cores, view=False, out_dir=str(out),
+                             variables={"Temperature": "temp"}, seasonal={"Temperature": dict(years, bottom=True)})
+            found.append(series_of(out, "temperature", "bottom", "seasonal"))
+        assert found[0].equals(found[1])
+
+    def test_a_mesh_in_metres(self, tmp_path, no_report):
+        sim = fvcom_simulation(str(tmp_path / "flat_sim"), cartesian=True)
+        arguments = dict(sim_dir=sim, n_dirs_down=0, cores=1, view=False, variables={"Temperature": "temp"},
+                         long_term={"Temperature": {"start": 2012, "end": 2012, "surface": True}})
+        with pytest.raises(ValueError, match="is in metres, with no longitudes and latitudes"):
+            oceanval.analyze(out_dir=str(tmp_path / "out"), stations={"Near": [-4.5, 50.3]}, **arguments)
+        oceanval.analyze(out_dir=str(tmp_path / "out"), **arguments)
+        lon, _, nv = fvcom_mesh()
+        # every triangle has the same area in the plane, so a node's weight is how many it is a corner of
+        corners = np.bincount((nv - 1).ravel(), minlength=len(lon))
+        value = series_of(tmp_path / "out", "temperature", "surface", "long_term").value.iloc[0]
+        assert np.isclose(value, 10 + (corners * stored(lon)).sum() / corners.sum() + 5.5, atol=1e-3)
+
+
+def write_peaks(sim):
+    """Make the surface temp of the daily files of sim peak on a day of the
+    year of its own at each node: minus how many days the day is from it,
+    its day being 20 + the node's number % 60, the days counted as 2012 has
+    them (a leap year), so each day of the year is the same in every year.
+    Returns the days of the peaks."""
+    import netCDF4
+
+    peaks = None
+    for path in simulation_files(sim):
+        with netCDF4.Dataset(path, "a") as ds:
+            nodes = ds.dimensions["node"].size
+            peaks = 20 + np.arange(nodes) % 60
+            days = []
+            for day in ds.variables["time"][:]:
+                date = datetime.date(1858, 11, 17) + datetime.timedelta(days=int(day))
+                days.append((datetime.date(2012, date.month, date.day) - datetime.date(2012, 1, 1)).days + 1)
+            temp = ds.variables["temp"][:]
+            temp[:, 0, :] = -np.abs(np.array(days)[:, None] - peaks[None, :])
+            ds.variables["temp"][:] = temp
+    return peaks
+
+
+class TestPhenology:
+    def test_the_peak_of_each_node(self, fvcom_sim, tmp_path, no_report):
+        from oceanval import analysis_plots as ap
+
+        peaks = write_peaks(fvcom_sim)
+        analyze(fvcom_sim, tmp_path / "out", climatology=None, phenology={"Temperature": {"start": 2012, "end": 2013}})
+        entry = no_report[-1]["variables"][0]["phenology"]
+        # January to April, 29 February too
+        assert entry["mesh"] == "node" and entry["days"] == 121
+        results = results_of(tmp_path / "out")
+        with xr.open_dataset(os.path.join(results, entry["file"])) as ds:
+            assert ds.attrs["mesh"] == "node" and {"lon", "lat", "nv"} <= set(ds.variables)
+            assert np.array_equal(ds[analysis.PEAK_DAY].values, peaks)
+            assert np.allclose(ds[analysis.PEAK_VALUE].values, 0)
+        # the daily cycle's mean over the domain, weighted by the nodes' areas
+        times, values, note = ap.domain_mean(os.path.join(results, entry["daily"]), "temperature")
+        lon, lat, nv = fvcom_mesh()
+        weights = hand_node_areas(lon, lat, nv)
+        first = (weights * -np.abs(1 - peaks)).sum() / weights.sum()
+        assert len(times) == 121 and note == "" and np.isclose(values[0], first, rtol=1e-3)
+
+
+class TestMapChanges:
+    def test_the_change_between_two_periods(self, fvcom_sim, tmp_path, no_report):
+        periods = {"historical": {"start": 2012, "end": 2012}, "future": [{"start": 2013, "end": 2013}],
+                   "plot": "absolute_changes", "surface": True}
+        analyze(fvcom_sim, tmp_path / "out", climatology=None, variables={"Temperature": "temp", "Percent": "temp"},
+                map_changes={"Temperature": dict(periods, change="absolute"),
+                             "Percent": dict(periods, change="percentage", water_column="integral")})
+        temperature, percent = no_report[-1]["variables"]
+        saved = temperature["map_changes"]["layers"]["surface"]
+        assert saved["mesh"] == "node"
+        lon, _, _ = fvcom_mesh()
+        historical = 10 + stored(lon) + np.mean([days_of(2012, m).mean() for m in (1, 2, 3, 4)])
+        future = 10 + stored(lon) + np.mean([days_of(2013, m).mean() for m in (1, 2)])
+        results = results_of(tmp_path / "out")
+
+        def read(name, key):
+            with xr.open_dataset(os.path.join(results, name)) as ds:
+                return ds[key].values[0]
+
+        assert np.allclose(read(saved["historical"], "temperature"), historical, atol=1e-3)
+        assert np.allclose(read(saved["futures"][0], "temperature"), future, atol=1e-3)
+        assert np.allclose(read(saved["changes"][0], "temperature"), future - historical, atol=1e-3)
+        shown = percent["map_changes"]["layers"]["surface"]
+        assert shown["change_units"] == "%"
+        assert np.allclose(read(shown["changes"][0], "percent"), 100 * (future - historical) / historical, rtol=1e-4)
+        assert percent["map_changes"]["layers"]["integral"]["units"] == "degrees_C m"
+
+
+class TestTransectsAreRefused:
     def test_analyze_says_what_is_not_yet_available(self, fvcom_sim, tmp_path, no_report):
         years = {"start": 2012, "end": 2012}
         with pytest.raises(ValueError) as raised:
@@ -308,12 +592,16 @@ class TestEverythingElseIsRefused:
                 transects={"Temperature": [{"start": [-5.0, 50.5], "end": [-4.0, 50.5], "climatology": years}]},
             )
         text = str(raised.value)
-        for what in ("phenology", "long-term time series", "seasonal cycles", "map temporal changes", "transects"):
-            assert what in text
-        # the climatology's bottom and water column can be worked out
-        assert "bottom is" not in text and "vertical mean" not in text
-        assert "not yet available for FVCOM output" in text and "only work out a climatology of FVCOM output" in text
+        assert "transects are not yet available for FVCOM output" in text and "leave out its transects" in text
+        for what in ("phenology", "long-term", "seasonal", "map temporal changes"):
+            assert what not in text
         assert not os.path.exists(os.path.join(str(tmp_path / "out"), analysis.FOLDER))
+
+    def test_the_water_column_of_the_series_needs_the_sigma_layers(self, fvcom_sim, tmp_path, no_report):
+        years = {"start": 2012, "end": 2013}
+        with pytest.raises(ValueError, match="the water column needs every part of it on the sigma layers"):
+            analyze(fvcom_sim, tmp_path / "out", variables={"Plus": "temp+zeta"}, climatology=None,
+                    long_term={"Plus": dict(years, water_column="mean")})
 
     def test_compare_simulations_still_refuses_fvcom(self, fvcom_sim, tmp_path, no_report):
         with pytest.raises(ValueError, match="compare_simulations does not work with FVCOM output yet"):
@@ -403,20 +691,31 @@ def to_options(app):
 
 
 class TestWindow:
-    def test_only_the_climatology_can_be_chosen(self, app, fvcom_sim, monkeypatch):
+    def test_everything_but_the_transects_can_be_chosen(self, app, fvcom_sim, monkeypatch):
         started = []
         monkeypatch.setattr(app, "start_run", lambda args, label: started.append(args))
         state = to_options(app)
-        assert state["fvcom"] is True and "only map its climatology, at the surface, the bottom" in state["fvcom_note"]
+        assert state["fvcom"] is True and "Transects are not yet available for FVCOM output." in state["fvcom_note"]
         # the dates are checked as matchup(fvcom=True) reads them
         assert app.analyze_check.request["fvcom"] is True and app.analyze_check.status == "done"
         years = {"use": True, "start": "2012", "end": "2013"}
-        status, reply = post(app, "/api/analyze_option", {"kind": "phenology", "form": {"rows": {"Temperature": years}}})
-        assert status == 400 and "Phenology is not yet available for FVCOM output." == reply["errors"]["rows"]
+        line = dict(analysis_forms.blank_transect(), start_lon="-5", start_lat="50.5", end_lon="-4", end_lat="50.5",
+                    climatology=True, climatology_start="2012", climatology_end="2012")
+        status, reply = post(app, "/api/analyze_option", {"kind": "transects", "form": {
+            "rows": {"Temperature": {"use": True, "transects": [line]}}, "thickness": ""}})
+        assert status == 400 and "Transects are not yet available for FVCOM output." == reply["errors"]["rows"]
+        # the phenology, of daily output
+        assert post(app, "/api/analyze_option", {"kind": "phenology", "form": {"rows": {"Temperature": years}}}) == (
+            200, {"ok": True})
         # the bottom and the water column, with no thickness asked for: it is worked out from the mesh
         column = {"rows": {"Temperature": dict(years, surface=True, bottom=True, water_column=True, how="mean")},
                   "thickness": ""}
         assert post(app, "/api/analyze_option", {"kind": "climatology", "form": column}) == (200, {"ok": True})
+        changes = {"rows": {"Temperature": {
+            "use": True, "historical_start": "2012", "historical_end": "2012", "future1_start": "2013",
+            "future1_end": "2013", "future2_start": "", "future2_end": "", "plot": "absolute", "change": "absolute",
+            "surface": False, "bottom": False, "water_column": True, "how": "integral"}}, "thickness": ""}
+        assert post(app, "/api/analyze_option", {"kind": "map_changes", "form": changes}) == (200, {"ok": True})
         for kind, form in (("cores", {"cores": "1"}), ("missing", {"from": "", "to": ""}), ("figure_code", {"choice": "no"})):
             assert post(app, "/api/analyze_option", {"kind": kind, "form": form})[0] == 200
         assert post(app, "/api/analyze_run") == (200, {"ok": True})
@@ -425,10 +724,12 @@ class TestWindow:
         given = {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords}
         assert given["climatology"] == {"Temperature": {"start": 2012, "end": 2013, "surface": True, "bottom": True,
                                                         "water_column": "mean"}}
-        assert given["phenology"] is None and given["thickness"] is None and started
+        assert given["phenology"] == {"Temperature": {"start": 2012, "end": 2013}}
+        assert given["map_changes"]["Temperature"]["water_column"] == "integral"
+        assert given["thickness"] is None and started
 
 
-def test_the_other_analyses_are_greyed_out_in_a_browser(browser, tmp_path):
+def test_the_transects_are_greyed_out_in_a_browser(browser, tmp_path):
     fvcom_months(str(tmp_path / "fvcom_sim"), MONTHS[:2])
     app = App(cwd=str(tmp_path))
     url = app.start()
@@ -441,10 +742,10 @@ def test_the_other_analyses_are_greyed_out_in_a_browser(browser, tmp_path):
         page.reload()
         page.wait_for_selector("#view-analyze-options:not([hidden])")
         assert page.is_visible("#ao-fvcom-note") and "FVCOM" in page.inner_text("#ao-fvcom-note")
-        assert page.is_enabled("#ao-climatology")
-        for kind in ("phenology", "long_term", "seasonal", "map_changes", "transects"):
-            assert page.is_disabled(f"#ao-{kind}")
-            assert page.inner_text(f"#ao-{kind}-text") == "Not yet available for FVCOM output"
+        for kind in ("climatology", "phenology", "long_term", "seasonal", "map_changes"):
+            assert page.is_enabled(f"#ao-{kind}")
+        assert page.is_disabled("#ao-transects")
+        assert page.inner_text("#ao-transects-text") == "Not yet available for FVCOM output"
         page.click("#ao-climatology")
         page.wait_for_selector("#clim-dialog:not([hidden])")
         cells = page.locator("#clim-body tr").first.locator("td")

@@ -513,10 +513,12 @@ def clean_map_changes(form, placed):
     return {"rows": rows, "thickness": str(form.get("thickness") or "").strip()}
 
 
-def check_map_changes(form, placed, known_years, available, cwd):
-    """Check the map changes pop-out's boxes (see clean_map_changes). Returns
-    (map_changes, thickness, errors): map_changes as analyze() takes it,
-    errors {name: {box: reason}}, "thickness" and "rows"."""
+def check_map_changes(form, placed, known_years, available, cwd, fvcom=False):
+    """Check the map changes pop-out's boxes (see clean_map_changes). fvcom:
+    the output is raw FVCOM output, whose cell thickness analyze() works out
+    itself, so none is asked for. Returns (map_changes, thickness, errors):
+    map_changes as analyze() takes it, errors {name: {box: reason}},
+    "thickness" and "rows"."""
     errors = {}
     chosen = {}
     column = False
@@ -560,7 +562,7 @@ def check_map_changes(form, placed, known_years, available, cwd):
         }
         column = column or box["water_column"]
     thickness = None
-    if column:
+    if column and not fvcom:
         thickness = check_thickness(form["thickness"], available, cwd, errors)
     if not chosen and not errors:
         errors["rows"] = "Tick Surface, Bottom, Water column, or more than one, for at least one variable to map the changes of."

@@ -593,6 +593,30 @@ def change_maps(results_dir, key, layer, also=None):
         ]
     )
 
+    if saved.get("mesh"):
+        # raw FVCOM output: each map drawn on its own mesh into the same places, without a colour bar of its own
+        mesh_options = {"limits": _Code("limits[index]"), "colours": _Code("colours[index]"), "title": _Code("title"),
+                        "legend_position": None, "grid_labels": False, "fig": _Code("fig"),
+                        "gs": _Code("grid[row, start:start + 2]")}
+        mesh_draw = "\n".join(
+            [
+                '    fig = plt.figure(figsize=size, layout="constrained")',
+                f"    grid = fig.add_gridspec({nrow}, {2 * ncol})",
+                "    for index, (title, path) in enumerate(maps):",
+                "        row, start = places[index]",
+                "\n".join("        " + line for line in _call("mesh_plot", mesh_options, args=(_Code("path"), key)).split("\n")),
+            ]
+        )
+        code = _code(
+            "import matplotlib.pyplot as plt\nfrom matplotlib.ticker import MaxNLocator\nfrom oceanval.mesh_maps import mesh_plot\n",
+            f"# the maps of {variable['name']} in each period, and the changes between them: {saved['title'].lower()}",
+            MESH_NOTE,
+            listing, setup, font,
+            'with plt.rc_context({"font.size": font_size}):\n' + mesh_draw + "\n" + colour_bars,
+        )
+        _run(code, "change_maps")
+        return Drawn(code, False, {}, _about(info))
+
     def code_for(grid):
         lines = [
             "# open each map",
@@ -624,6 +648,13 @@ def domain_mean(path, variable):
     about a grid whose cell areas could not be worked out ("" if all was well)."""
     from oceanval.analysis_series import robust_spatial_mean
 
+    with xr.open_dataset(path, decode_times=False) as ds_xr:
+        on_mesh = bool(ds_xr.attrs.get("mesh"))
+    if on_mesh:
+        # raw FVCOM output, on its own mesh, which CDO cannot read: weighted by the areas of its cells
+        from oceanval.mesh_means import domain_mean as mesh_domain_mean
+
+        return mesh_domain_mean(path, variable)
     ds = nc.open_data(path, checks=False)
     with warnings.catch_warnings(record=True):
         ds.subset(variables=variable)
@@ -668,17 +699,8 @@ def peak_day_map(results_dir, key):
                "legend": "Day of the seasonal peak"}
     if _takes_grid_labels():
         options["grid_labels"] = True
-
-    def code_for(grid):
-        return _code(
-            MAP_IMPORTS,
-            f"# the day of the year of the seasonal peak of surface {variable['name']}",
-            _open_code(path, PEAK_DAY, grid),
-            "# the day each month starts on in the model's calendar, and the months' names",
-            f"month_starts = {_py(starts)}",
-            f"month_names = {_py(names)}",
-            "# the colours are cyclic, so the end of the year is close in colour to its start",
-            _call("ds.pub_plot", options),
+    month_bar = "\n".join(
+        [
             "# the colour bar is labelled by month",
             "fig = plt.gcf()",
             'bars = [ax for ax in fig.axes if not hasattr(ax, "projection")]',
@@ -690,6 +712,39 @@ def peak_day_map(results_dir, key):
             "    else:",
             "        bar.set_xticks(month_starts)",
             "        bar.set_xticklabels(month_names)",
+        ]
+    )
+    months = "\n".join(
+        [
+            "# the day each month starts on in the model's calendar, and the months' names",
+            f"month_starts = {_py(starts)}",
+            f"month_names = {_py(names)}",
+        ]
+    )
+    if variable["phenology"].get("mesh"):
+        mesh_options = {"limits": [1, days], "colours": "twilight", "legend": "Day of the seasonal peak",
+                        "grid_labels": True}
+        code = _code(
+            "import matplotlib.pyplot as plt\nfrom oceanval.mesh_maps import mesh_plot\n",
+            f"# the day of the year of the seasonal peak of surface {variable['name']}",
+            MESH_NOTE,
+            months,
+            "# the colours are cyclic, so the end of the year is close in colour to its start",
+            _call("mesh_plot", mesh_options, args=(path, PEAK_DAY)),
+            month_bar,
+        )
+        _run(code, "peak_day_map")
+        return Drawn(code, False, {}, _about(info))
+
+    def code_for(grid):
+        return _code(
+            MAP_IMPORTS,
+            f"# the day of the year of the seasonal peak of surface {variable['name']}",
+            _open_code(path, PEAK_DAY, grid),
+            months,
+            "# the colours are cyclic, so the end of the year is close in colour to its start",
+            _call("ds.pub_plot", options),
+            month_bar,
         )
 
     return _map(code_for, path, info, "peak_day_map")
@@ -701,6 +756,17 @@ def peak_value_map(results_dir, key):
     variable = entry(info, key)
     path = _path(results_dir, variable["phenology"]["file"])
     options = {"var": PEAK_VALUE, "robust": True, "legend": legend(f"Peak {variable['name']}", variable["units"])}
+    if variable["phenology"].get("mesh"):
+        mesh_options = {"robust": True, "legend": options["legend"], "grid_labels": True}
+        code = _code(
+            "import matplotlib.pyplot as plt\nfrom oceanval.mesh_maps import mesh_plot\n",
+            f"# the seasonal peak of surface {variable['name']}: the highest value of its daily climatology",
+            MESH_NOTE,
+            "# the colours run from the 2nd to the 98th percentile of the map (robust=True)",
+            _call("mesh_plot", mesh_options, args=(path, PEAK_VALUE)),
+        )
+        _run(code, "peak_value_map")
+        return Drawn(code, False, {}, _about(info))
 
     def code_for(grid):
         return _code(

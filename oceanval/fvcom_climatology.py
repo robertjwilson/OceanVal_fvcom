@@ -23,7 +23,12 @@ and each time step is taken to its layer as nctoolkit would take it:
 Then for each month of each year, the sum of each node's (or element's)
 values and how many there are. The monthly mean of each year is taken first,
 then the climatology is the mean of each month of the year over the years, and
-the annual mean the mean of those, as analysis.climatology_of does.
+the annual mean the mean of those, as analysis.climatology_of does. The years
+are read one at a time (monthly_means), so no more than a year of months is
+held at once. The monthly means are also those the long-term and seasonal
+series are of (see oceanval.analysis_series and oceanval.mesh_means), and the
+daily climatology of the phenology is worked out in the same way, by day
+(daily_climatology).
 
 The files can be shared out to `cores` processes, each running this file as a
 script by its path (python -I), as it imports nothing of OceanVal: a spawned
@@ -58,6 +63,12 @@ LAYERS = (SURFACE, BOTTOM, MEAN, INTEGRAL)
 MESH = ("lon", "lat", "lonc", "latc", "x", "y", "nv")
 # the most values read at once, from one variable
 BLOCK_VALUES = 20_000_000
+# the most values of a daily climatology worked out at once (days x cells): a mesh with more
+# cells is worked out a band of its cells at a time
+DAILY_VALUES = 40_000_000
+# what the sums are taken over: each month of each year, or each day
+MONTH = "month"
+DAY = "day"
 
 
 def variables(path):
@@ -119,6 +130,19 @@ def vertical(path, parts):
         }
 
 
+def has_lon_lat(path):
+    """Whether the FVCOM file at path has the longitudes and latitudes of its
+    mesh (a mesh in metres has them all 0, or none)."""
+    import netCDF4
+
+    with netCDF4.Dataset(path) as handle:
+        if "lon" not in handle.variables or "lat" not in handle.variables:
+            return False
+        lon = np.ma.filled(np.ma.asarray(handle.variables["lon"][:]).astype("float64"), np.nan)
+        lat = np.ma.filled(np.ma.asarray(handle.variables["lat"][:]).astype("float64"), np.nan)
+    return bool(np.nanmax(np.abs(lon)) > 0 or np.nanmax(np.abs(lat)) > 0)
+
+
 def not_layered(path, parts):
     """Those of parts that are not on the sigma layers (siglay) of the FVCOM
     file at path, and so have no water column to take: those on the sigma
@@ -128,7 +152,7 @@ def not_layered(path, parts):
 
 
 def _times(handle, time_shift):
-    """The (year, month) of each time in an open FVCOM file, moved by
+    """The (year, month, day) of each time in an open FVCOM file, moved by
     time_shift days."""
     time = handle.variables["time"]
     calendar = getattr(time, "calendar", "standard")
@@ -138,7 +162,7 @@ def _times(handle, time_shift):
         import datetime
 
         dates = [date + datetime.timedelta(days=time_shift) for date in dates]
-    return [(int(date.year), int(date.month)) for date in dates]
+    return [(int(date.year), int(date.month), int(date.day)) for date in dates]
 
 
 def _missing(values, as_missing):
@@ -153,11 +177,12 @@ def _missing(values, as_missing):
     return values
 
 
-def _read(variable, start, stop, level=None):
+def _read(variable, start, stop, level=None, cells=None):
     """The values of variable at times start to stop as a float64 array with
     NaN where they are missing: at its level-th sigma layer (or level), as
     (time, cells), or with level None at all of them, as (time, levels,
-    cells). A variable with no vertical dimension is (time, cells)."""
+    cells). A variable with no vertical dimension is (time, cells). cells, a
+    slice, reads only those of its nodes or elements."""
     dims = variable.dimensions
     index, kept = [], []
     for dim in dims:
@@ -165,7 +190,7 @@ def _read(variable, start, stop, level=None):
             index.append(slice(start, stop))
             kept.append(dim)
         elif dim in (NODE, NELE):
-            index.append(slice(None))
+            index.append(slice(None) if cells is None else cells)
             kept.append(dim)
         elif dim in VERTICAL and level is None:
             index.append(slice(None))
@@ -180,12 +205,12 @@ def _read(variable, start, stop, level=None):
     return values.reshape((stop - start,) + values.shape[1:-1] + (-1,))
 
 
-def _summed(handle, parts, start, stop, as_missing, level=None):
+def _summed(handle, parts, start, stop, as_missing, level=None, cells=None):
     """The sum of parts (see _read), with as_missing made missing in each. A
     value missing in any part is missing in the sum, as CDO sums."""
     values = None
     for name in parts:
-        part = _missing(_read(handle.variables[name], start, stop, level), as_missing)
+        part = _missing(_read(handle.variables[name], start, stop, level, cells), as_missing)
         values = part if values is None else values + part
     return values
 
@@ -286,24 +311,34 @@ def _column(handle, parts, start, stop, as_missing, layer, where, shares, h):
         return np.where(depth > 0, total / np.where(depth > 0, depth, 1.0), np.nan)
 
 
-def file_sums(path, parts, years, time_shift=None, as_missing=None, layer=SURFACE):
+def file_sums(path, parts, years, time_shift=None, as_missing=None, layer=SURFACE, by=MONTH, cells=None):
     """The sums of the values of the sum of parts in layer (one of LAYERS)
     in one FVCOM file, and how many there are, in each month of years
     ([first, last]): {(year, month): (sums, counts)}, each an array with a
     value for each cell. A cell missing in any part is missing in the sum, as
-    CDO sums."""
+    CDO sums. by DAY takes them over each day instead, {(year, month, day):
+    ...}. cells ([first, last + 1], the surface only) reads only those
+    cells."""
     import netCDF4
 
     if layer not in LAYERS:
         raise ValueError(f"layer must be one of {', '.join(LAYERS)}, not {layer}.")
+    if by not in (MONTH, DAY):
+        raise ValueError(f"by must be {MONTH} or {DAY}, not {by}.")
+    if cells is not None and layer != SURFACE:
+        raise ValueError("Only the surface can be read a band of cells at a time.")
+    band = None if cells is None else slice(int(cells[0]), int(cells[1]))
     found = {}
     with netCDF4.Dataset(path) as handle:
-        months = _times(handle, time_shift)
-        if not months:
+        dates = _times(handle, time_shift)
+        if not dates:
             return found
+        months = [date[:2] if by == MONTH else date for date in dates]
         first = handle.variables[parts[0]]
         where = NODE if NODE in first.dimensions else NELE
         cells = int(np.prod([len(handle.dimensions[dim]) for dim in first.dimensions if dim in (NODE, NELE)]))
+        if band is not None:
+            cells = len(range(cells)[band])
         read = 1
         if layer in (MEAN, INTEGRAL):
             bad = [name for name in parts if SIGLAY not in handle.variables[name].dimensions]
@@ -323,7 +358,7 @@ def file_sums(path, parts, years, time_shift=None, as_missing=None, layer=SURFAC
             if not wanted:
                 continue
             if layer == SURFACE:
-                values = _summed(handle, parts, start, stop, as_missing, 0)
+                values = _summed(handle, parts, start, stop, as_missing, 0, band)
             elif layer == BOTTOM:
                 values = _bottom(handle, parts, start, stop, as_missing)
             else:
@@ -348,14 +383,15 @@ def _add(total, found):
 
 def _run_jobs(jobs, out_dir):
     """Work out the file_sums of each of jobs ([path, parts, years,
-    time_shift, as_missing, layer]), saving each as out_dir/<n>.npz: the
-    script each worker process runs."""
-    for number, (path, parts, years, time_shift, as_missing, layer) in jobs:
-        found = file_sums(path, parts, years, time_shift, as_missing, layer)
+    time_shift, as_missing, layer, by, cells]), saving each as
+    out_dir/<n>.npz: the script each worker process runs."""
+    for number, (path, parts, years, time_shift, as_missing, layer, by, cells) in jobs:
+        found = file_sums(path, parts, years, time_shift, as_missing, layer, by, cells)
         arrays = {}
-        for (year, month), (sums, counts) in found.items():
-            arrays[f"sums_{year}_{month}"] = sums
-            arrays[f"counts_{year}_{month}"] = counts
+        for key, (sums, counts) in found.items():
+            name = "_".join(str(x) for x in key)
+            arrays[f"sums_{name}"] = sums
+            arrays[f"counts_{name}"] = counts
         np.savez(os.path.join(out_dir, f"{number}.npz"), **arrays)
 
 
@@ -364,23 +400,26 @@ def _read_saved(path):
     with np.load(path) as saved:
         for name in saved.files:
             if name.startswith("sums_"):
-                _, year, month = name.split("_")
-                found[(int(year), int(month))] = (saved[name], saved[f"counts_{year}_{month}"])
+                key = name[len("sums_"):]
+                found[tuple(int(x) for x in key.split("_"))] = (saved[name], saved[f"counts_{key}"])
     return found
 
 
-def monthly_sums(files, parts, years, time_shift=None, as_missing=None, cores=1, layer=SURFACE):
+def monthly_sums(files, parts, years, time_shift=None, as_missing=None, cores=1, layer=SURFACE, by=MONTH,
+                 cells=None):
     """The file_sums of every one of files in layer, added: {(year, month):
-    (sums, counts)}. With cores > 1 the files are shared out to that many
-    processes running this file as a script."""
+    (sums, counts)} (or by day, see file_sums). With cores > 1 the files are
+    shared out to that many processes running this file as a script."""
     total = {}
     workers = max(1, min(int(cores), len(files)))
     if workers == 1:
         for path in files:
-            _add(total, file_sums(path, parts, years, time_shift, as_missing, layer))
+            _add(total, file_sums(path, parts, years, time_shift, as_missing, layer, by, cells))
         return total
+    cells = None if cells is None else [int(cells[0]), int(cells[1])]
     jobs = [
-        [number, [path, list(parts), list(years), time_shift, as_missing, layer]] for number, path in enumerate(files)
+        [number, [path, list(parts), list(years), time_shift, as_missing, layer, by, cells]]
+        for number, path in enumerate(files)
     ]
     with tempfile.TemporaryDirectory(prefix="oceanval_fvcom_") as out_dir:
         running = []
@@ -410,23 +449,109 @@ def monthly_sums(files, parts, years, time_shift=None, as_missing=None, cores=1,
     return total
 
 
+def _mean(sums, counts):
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
+
+
 def climatology(total):
     """The months of the year in total (see monthly_sums), and the
     climatology of each: the mean over the years of each year's monthly mean,
     as ([month, ...], array (months, cells)). A cell with no values is NaN."""
-    by_month = {}
+    climate = _Climate()
     for (year, month), (sums, counts) in sorted(total.items()):
-        with np.errstate(invalid="ignore", divide="ignore"):
-            mean = np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
-        by_month.setdefault(month, []).append(mean)
-    months = sorted(by_month)
-    fields = []
-    for month in months:
-        stack = np.vstack(by_month[month])
-        with np.errstate(invalid="ignore"):
-            seen = np.isfinite(stack).sum(axis=0)
-            fields.append(np.where(seen > 0, np.nansum(stack, axis=0) / np.maximum(seen, 1), np.nan))
-    return months, np.vstack(fields) if fields else np.zeros((0, 0))
+        climate.add(year, month, _mean(sums, counts))
+    months, fields, _ = climate.fields()
+    return months, fields
+
+
+class _Climate:
+    """The mean over the years of each period of the year (a month, or a
+    (month, day)), added a year's mean at a time: a cell with no values is
+    NaN."""
+
+    def __init__(self):
+        self.sums, self.seen, self.last = {}, {}, {}
+
+    def add(self, year, period, mean):
+        if period not in self.sums:
+            self.sums[period] = np.zeros(mean.shape)
+            self.seen[period] = np.zeros(mean.shape, dtype="int64")
+        ok = np.isfinite(mean)
+        self.sums[period][ok] += mean[ok]
+        self.seen[period] += ok
+        self.last[period] = max(year, self.last.get(period, year))
+
+    def fields(self):
+        """(periods, array (periods, cells), the last year of each period)."""
+        periods = sorted(self.sums)
+        if not periods:
+            return [], np.zeros((0, 0)), []
+        fields = np.vstack([_mean(self.sums[period], self.seen[period]) for period in periods])
+        return periods, fields, [self.last[period] for period in periods]
+
+
+def years_of(file_years, years):
+    """The years ([first, last]) to read one at a time, each with the files
+    holding times in it: [(year, files)]. file_years is {path: the years of its
+    (shifted) times}; files whose times are not known are read for every year."""
+    return [
+        (year, [path for path, held in file_years.items() if held is None or year in held])
+        for year in range(int(years[0]), int(years[1]) + 1)
+    ]
+
+
+def monthly_means(files, parts, years, time_shift=None, as_missing=None, cores=1, layer=SURFACE, file_years=None):
+    """The mean of each month of each year in layer of the sum of parts in the
+    FVCOM files, over years ([first, last]), in order: yields ((year, month),
+    array of a value for each cell, NaN where there is none). With file_years
+    ({path: the years of its times}, as analyze() reads them) a year is read at
+    a time, from only its files, so no more than a year of months is held."""
+    if file_years is None:
+        total = monthly_sums(files, parts, years, time_shift, as_missing, cores, layer)
+        for key in sorted(total):
+            yield key, _mean(*total[key])
+        return
+    file_years = {path: file_years.get(path) for path in files}
+    for year, chosen in years_of(file_years, years):
+        if not chosen:
+            continue
+        total = monthly_sums(chosen, parts, [year, year], time_shift, as_missing, cores, layer)
+        for key in sorted(total):
+            yield key, _mean(*total[key])
+
+
+def daily_climatology(files, parts, years, time_shift=None, as_missing=None, cores=1, file_years=None):
+    """The daily climatology of the sum of parts at the surface of the FVCOM
+    files over years ([first, last]): each year's mean of each day, then the
+    mean over the years of each day of the year, as CDO's ydaymean takes it
+    of daily output. Returns ([(year, month, day)], array (days, cells)), the
+    days in order through the year, each in the last year that has it, as
+    CDO dates the days of a climatology. A mesh with many cells is worked out
+    a band of them at a time (DAILY_VALUES)."""
+    import netCDF4
+
+    with netCDF4.Dataset(files[0]) as handle:
+        dims = handle.variables[parts[0]].dimensions
+        cells = int(np.prod([len(handle.dimensions[dim]) for dim in dims if dim in (NODE, NELE)]))
+    file_years = {path: (file_years or {}).get(path) for path in files}
+    step = max(1, DAILY_VALUES // 366)
+    days, pieces = None, []
+    for first in range(0, cells, step):
+        band = [first, min(first + step, cells)]
+        climate = _Climate()
+        for year, chosen in years_of(file_years, years):
+            if not chosen:
+                continue
+            total = monthly_sums(chosen, parts, [year, year], time_shift, as_missing, cores, SURFACE, DAY, band)
+            for (y, month, day) in sorted(total):
+                climate.add(y, (month, day), _mean(*total[(y, month, day)]))
+        periods, fields, last = climate.fields()
+        if not periods:
+            return [], np.zeros((0, 0))
+        days = [(year, month, day) for year, (month, day) in zip(last, periods)]
+        pieces.append(fields.astype("float32"))
+    return days, np.hstack(pieces)
 
 
 def _mesh(path):
@@ -450,15 +575,20 @@ FILL = np.float32(-1e20)
 TIME_UNITS = "days since 1900-01-01 00:00:00"
 
 
-def save(path, key, where, months, fields, year, mesh_from, units, long_name):
+def save(path, key, where, months, fields, year, mesh_from, units, long_name, days=None):
     """Save fields (a row for each of months) as variable key on the mesh
     (where: NODE or NELE) of the FVCOM file mesh_from, at path: a time for
     each month, on its first day in year, as CDO dates a climatology, and the
-    month of each in "month"."""
+    month of each in "month". days ([(year, month, day)]) gives the date of
+    each row instead (a daily climatology's)."""
     import xarray as xr
 
     mesh, calendar = _mesh(mesh_from)
-    dates = [cftime.datetime(year, month, 1, calendar=calendar) for month in months]
+    if days is None:
+        dates = [cftime.datetime(year, month, 1, calendar=calendar) for month in months]
+    else:
+        dates = [cftime.datetime(y, m, d, calendar=calendar) for y, m, d in days]
+        months = [m for _, m, _ in days]
     time = cftime.date2num(dates, TIME_UNITS, calendar)
     ds = xr.Dataset(
         {
@@ -477,25 +607,40 @@ def save(path, key, where, months, fields, year, mesh_from, units, long_name):
 
 
 def work_out(files, parts, years, key, monthly, annual, units, long_name, time_shift=None, as_missing=None, cores=1,
-             layer=SURFACE):
+             layer=SURFACE, file_years=None):
     """The climatology in layer (one of LAYERS) of the sum of parts in the
     FVCOM files, over years ([first, last]): its monthly climatology saved
-    at monthly, and its annual mean, the mean of the months, at annual.
-    Returns (where, months):
+    at monthly (unless it is None), and its annual mean, the mean of the
+    months, at annual. file_years: see monthly_means. Returns (where, months):
     the part of the mesh it is on, and how many months the climatology has.
     Raises ValueError if there is no output in years."""
     where = location(files[0], parts)
-    total = monthly_sums(files, parts, years, time_shift, as_missing, cores, layer)
-    if not total:
+    climate = _Climate()
+    for (year, month), mean in monthly_means(files, parts, years, time_shift, as_missing, cores, layer, file_years):
+        climate.add(year, month, mean)
+    months, fields, last = climate.fields()
+    if not months:
         raise ValueError(f"There is no output of {'+'.join(parts)} in {years[0]}-{years[1]}.")
-    months, fields = climatology(total)
-    last = max(year for year, _ in total)
-    save(monthly, key, where, months, fields, last, files[0], units, long_name)
-    with np.errstate(invalid="ignore"):
-        seen = np.isfinite(fields).sum(axis=0)
-        mean = np.where(seen > 0, np.nansum(fields, axis=0) / np.maximum(seen, 1), np.nan)
-    save(annual, key, where, [months[0]], mean[None, :], last, files[0], units, long_name)
+    last = max(last)
+    if monthly is not None:
+        save(monthly, key, where, months, fields, last, files[0], units, long_name)
+    save(annual, key, where, [months[0]], _mean(np.nansum(fields, axis=0), np.isfinite(fields).sum(axis=0))[None, :],
+         last, files[0], units, long_name)
     return where, len(months)
+
+
+def daily_work_out(files, parts, years, key, out, units, long_name, time_shift=None, as_missing=None, cores=1,
+                   file_years=None):
+    """The daily climatology at the surface of the sum of parts in the FVCOM
+    files over years (see daily_climatology), saved at out on the mesh.
+    Returns the part of the mesh it is on. Raises ValueError if there is no
+    output in years."""
+    where = location(files[0], parts)
+    days, fields = daily_climatology(files, parts, years, time_shift, as_missing, cores, file_years)
+    if not days:
+        raise ValueError(f"There is no output of {'+'.join(parts)} in {years[0]}-{years[1]}.")
+    save(out, key, where, None, fields, None, files[0], units, long_name, days=days)
+    return where
 
 
 if __name__ == "__main__":

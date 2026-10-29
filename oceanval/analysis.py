@@ -867,6 +867,12 @@ def peak(path, variable, out):
         coords = {
             name: coord for name, coord in values.coords.items() if time_dim not in coord.dims
         }
+        # raw FVCOM output's mesh, which its maps are drawn on (see oceanval.fvcom_climatology)
+        mesh = {}
+        if ds.attrs.get("mesh"):
+            from oceanval.fvcom_climatology import MESH
+
+            mesh = {name: ds[name].variable.copy() for name in MESH if name in ds.variables}
         starts = month_starts(month_days)
         result = xr.Dataset(
             {
@@ -878,6 +884,7 @@ def peak(path, variable, out):
                     "long_name": "Seasonal peak",
                     "units": str(values.attrs.get("units", "")),
                 }),
+                **mesh,
             },
             coords=coords,
             attrs={
@@ -885,6 +892,7 @@ def peak(path, variable, out):
                 "month_starts": [starts[month] for month in sorted(starts)],
                 "months": sorted(starts),
                 "source": os.path.basename(path),
+                **({"mesh": ds.attrs["mesh"]} if mesh else {}),
             },
         )
         for name in (PEAK_DAY, PEAK_VALUE):
@@ -1195,10 +1203,19 @@ def _work_out(row, results_dir, thickness, thickness_for, time_shift, area=None,
         _tell_each(row, ["phenology"], "working")
         years = (row["phenology"]["start"], row["phenology"]["end"])
         _say(f"Working out the phenology of {row['name']}")
-        ds = daily_climatology_of(row["phenology"]["files"], row, years, time_shift, row["levels"])
-        _labelled(ds, row, row["units"], "daily climatology at the surface")
         daily = os.path.join(results_dir, f"{row['key']}_surface_daily.nc")
-        _save(ds, daily)
+        if row.get("fvcom"):
+            from oceanval import fvcom_climatology
+
+            where = fvcom_climatology.daily_work_out(
+                row["phenology"]["files"], row["parts"], list(years), row["key"], daily, row["units"],
+                f"{row['name']}, daily climatology at the surface", time_shift=time_shift,
+                as_missing=row.get("as_missing"), cores=row.get("cores", 1), file_years=file_years(row),
+            )
+        else:
+            ds = daily_climatology_of(row["phenology"]["files"], row, years, time_shift, row["levels"])
+            _labelled(ds, row, row["units"], "daily climatology at the surface")
+            _save(ds, daily)
         phenology_file = os.path.join(results_dir, f"{row['key']}_phenology.nc")
         peak(daily, row["key"], phenology_file)
         with xr.open_dataset(phenology_file) as ds_peak:
@@ -1212,6 +1229,8 @@ def _work_out(row, results_dir, thickness, thickness_for, time_shift, area=None,
             "file": os.path.basename(phenology_file),
             "days": days,
         }
+        if row.get("fvcom"):
+            entry["phenology"]["mesh"] = where
         _tell_each(row, ["phenology"], "done")
 
     if row["long_term"] or row["seasonal"]:
@@ -1241,22 +1260,16 @@ def _work_out(row, results_dir, thickness, thickness_for, time_shift, area=None,
     return entry
 
 
-# what Analyze can work out of raw FVCOM output so far: a climatology (at the surface, the bottom
-# or through the water column)
+# what Analyze cannot yet work out of raw FVCOM output: everything else is
 FVCOM_TEXT = {
-    "phenology": "phenology",
-    "long_term": "long-term time series",
-    "seasonal": "seasonal cycles",
-    "map_changes": "map temporal changes",
     "transects": "transects",
 }
 
 
 def fvcom_unsupported(row):
     """What row (check_arguments's) asks for that Analyze cannot yet work
-    out of raw FVCOM output, as keys of FVCOM_TEXT: everything but a
-    climatology."""
-    return [kind for kind in KINDS if kind != "climatology" and row[kind]]
+    out of raw FVCOM output, as keys of FVCOM_TEXT: the transects."""
+    return [kind for kind in KINDS if kind in FVCOM_TEXT and row[kind]]
 
 
 def fvcom_text(unsupported):
@@ -1264,10 +1277,37 @@ def fvcom_text(unsupported):
     names = [FVCOM_TEXT[x] for x in unsupported]
     listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
     return (
-        f"this is raw FVCOM output, and {listed} {'is' if len(names) == 1 else 'are'} not yet available for "
-        "FVCOM output. So far Analyze can only work out a climatology of FVCOM output (at the surface, the bottom "
-        "or through the water column)."
+        f"this is raw FVCOM output, and {listed} are not yet available for "
+        "FVCOM output. Analyze can work out everything else of FVCOM output: leave out its transects."
     )
+
+
+def check_mesh_area(rows, area):
+    """Raise ValueError if the time series of a variable of raw FVCOM output
+    whose mesh is in metres, with no longitudes and latitudes, are asked to be
+    of regions, a lon/lat box or stations, none of which can then be found on
+    it (see check_area): its Full Domain series can still be worked out."""
+    from oceanval import fvcom_climatology
+
+    if area["region_file"] is None and area["lon_lim"] is None and not area["stations"]:
+        return
+    problems = [
+        f"{row['name']} ({row['model_variable']})"
+        for row in rows
+        if row.get("fvcom") and (row["long_term"] or row["seasonal"]) and not fvcom_climatology.has_lon_lat(row["files"][0])
+    ]
+    if problems:
+        raise ValueError(
+            f"The FVCOM mesh of {', '.join(problems)} is in metres, with no longitudes and latitudes, so its series "
+            "cannot be of regions, a lon/lat box or stations: leave out subregions, lon_lim, lat_lim and stations."
+        )
+
+
+def file_years(row):
+    """The years of the (shifted) times of each of row's files, as
+    oceanval.fvcom_climatology reads raw FVCOM output a year at a time:
+    {path: {year, ...}}."""
+    return {path: {int(year) for year in df.year} for path, df in row["times"].items()}
 
 
 def _fvcom_climatology(row, results_dir, layer, years, time_shift):
@@ -1293,6 +1333,7 @@ def _fvcom_climatology(row, results_dir, layer, years, time_shift):
         as_missing=row.get("as_missing"),
         cores=row.get("cores", 1),
         layer=layer,
+        file_years=file_years(row),
     )
     return {
         "title": LAYER_TITLES[layer],
@@ -1372,7 +1413,9 @@ def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_
                 fvcom_climatology.location(stream["files"][0], row["parts"])
             except ValueError as error:
                 problems.append(f"{row['name']} ({row['model_variable']}): {error}")
-            column = row["climatology"] and any(layer in WATER_COLUMN for layer in row["climatology"]["layers"])
+            column = any(
+                layer in WATER_COLUMN for kind in LAYERED + ("map_changes",) if row[kind] for layer in row[kind]["layers"]
+            )
             bad = fvcom_climatology.not_layered(stream["files"][0], row["parts"]) if column else []
             if bad and row["levels"] > 1:
                 # a variable with one level is told below; one on the tops and bottoms of the layers
@@ -1734,6 +1777,7 @@ def analyze(
         times_index = os.path.abspath(os.fspath(times_index))
     locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_index)
     require_thickness([row for row in rows if not row.get("fvcom")], thickness)
+    check_mesh_area(rows, area)
 
     # any analysis there before is replaced, as validate() replaces its report
     folder = os.path.join(out_dir, FOLDER)

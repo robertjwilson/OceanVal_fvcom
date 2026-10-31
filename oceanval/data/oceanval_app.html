@@ -1414,7 +1414,7 @@
           <ul class="vw-list" id="vw-list" role="listbox" aria-label="Variables" aria-multiselectable="true"></ul>
         </div>
         <div class="vw-control" id="vw-c-years" hidden>
-          <h2 class="vw-head">Years</h2>
+          <h2 class="vw-head">Subset years</h2>
           <div class="vw-grid">
             <label><span class="g-label">First year</span><input class="s-input is-num" id="vw-first" inputmode="numeric" placeholder="first" spellcheck="false" autocomplete="off" disabled></label>
             <label><span class="g-label">Last year</span><input class="s-input is-num" id="vw-last" inputmode="numeric" placeholder="last" spellcheck="false" autocomplete="off" disabled></label>
@@ -2398,6 +2398,18 @@
   </div>
 </div>
 
+<!-- Map phenologies opened when no variable has daily output (openNoDaily) -->
+<div class="picker" id="no-daily" hidden>
+  <div class="picker__card picker__card--narrow" role="alertdialog" aria-modal="true" aria-labelledby="no-daily-title" aria-describedby="no-daily-text">
+    <div class="picker__head">
+      <h2 id="no-daily-title">No daily output</h2>
+    </div>
+    <div class="how__body" id="no-daily-text"></div>
+    <div class="picker__foot">
+      <button type="button" class="btn btn--primary" id="no-daily-close">Close</button>
+    </div>
+  </div>
+</div>
 <div class="picker" id="how" hidden>
   <div class="picker__card picker__card--narrow" role="dialog" aria-modal="true" aria-labelledby="how-title">
     <div class="picker__head">
@@ -2543,7 +2555,7 @@
       <h2 id="chg-title">Map temporal changes</h2>
     </div>
     <div class="analyze-dialog__body">
-      <p class="analyze-dialog__intro">Maps of how a variable changes between a historical period and one or two future periods. Each period is mapped as the mean of its years' annual means. Give the first and last years of each period, tick the surface, the bottom (the deepest value that is not missing), the water column, or more than one, and choose what to plot and whether the changes are absolute or percentages.</p>
+      <p class="analyze-dialog__intro">Maps of how a variable changes between a historical period and one or two future periods. Each period is mapped as the mean of its years' annual means. Give the first and last years of each period, tick the surface, the bottom, the water column, or more than one, and choose what to plot and whether the changes are absolute or percentages.</p>
       <p class="own-legend"><span class="own-swatch" aria-hidden="true"></span><span>Marked <b class="is-required-word">Required</b> is what has to be given for each variable ticked: <b>Surface</b>, <b>Bottom</b>, <b>Water column</b> or more than one, the years of its historical period and of its first future period, what to plot, and the kind of change. Untick a variable to leave it out. A second future period is optional: give both of its years, or neither.</span></p>
       <p class="analyze-msg is-rows" id="chg-msg" role="status" aria-live="polite"></p>
       <table>
@@ -6800,15 +6812,46 @@
 
   const dialogPrefix = (kind) => (kind === "phenology" ? "phen" : kind === "transects" ? "trans" : kind === "map_changes" ? "chg" : "clim");
 
+  // phenologies need daily output: with none in any variable there is nothing to choose, so the page says so
+  function openNoDaily() {
+    $("no-daily-text").replaceChildren(
+      el("p", { text: "Phenologies need daily output, and none of the variables has it." }),
+      el("ul", {}, ...state.analyze.placed.map((row) => el("li", { text: `${row.name}: ${needsDaily(row)}` }))));
+    noDaily.opener = document.activeElement;
+    $("no-daily").hidden = false;
+    BEHIND.forEach((node) => { node.inert = true; });
+    $("no-daily-close").focus();
+  }
+
+  function closeNoDaily() {
+    $("no-daily").hidden = true;
+    BEHIND.forEach((node) => { node.inert = false; });
+    if (noDaily.opener && document.contains(noDaily.opener)) noDaily.opener.focus();
+  }
+
+  const noDaily = { opener: null };
+  $("no-daily-close").addEventListener("click", closeNoDaily);
+  $("no-daily").addEventListener("click", (event) => { if (event.target === $("no-daily")) closeNoDaily(); });
+  $("no-daily").addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeNoDaily();
+    }
+  });
+
   function openAnalyzeDialog(kind) {
     const form = state.analyze.forms[kind];
     if (!form) return;
+    if (kind === "phenology" && !state.analyze.placed.some((row) => row.time_res === state.analyze.daily)) {
+      openNoDaily();
+      return;
+    }
     analyzeDialog.kind = kind;
     analyzeDialog.opener = document.activeElement;
     if (LAYERED.includes(kind)) {
       $("clim-title").textContent = KIND_TITLES[kind];
       $("clim-intro").replaceChildren(
-        `${KIND_INTROS[kind]} Tick the surface, the bottom (the deepest value that is not missing), the water column, or more than one, for each variable to work it out for, and give the years: the water column is its vertical mean or its depth integral.`);
+        `${KIND_INTROS[kind]} Tick the surface, the bottom, the water column, or more than one, for each variable to work it out for, and give the years: the water column is its vertical mean or its depth integral.`);
       climatologyRows(form, kind);
       document.querySelectorAll("#clim-dialog .is-series").forEach((cell) => { cell.hidden = kind !== "long_term"; });
       fillThickness(form, kind);

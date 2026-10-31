@@ -335,15 +335,15 @@ class TestTimeShift:
 
 
 class TestOptions:
-    def test_the_pop_outs_start_with_every_variable_ticked_and_nothing_else(self, app, sim):
+    def test_the_pop_outs_start_with_nothing_ticked(self, app, sim):
         state = to_options(app)
         assert app.view == "analyze_options"
         for kind in ("climatology", "long_term", "seasonal"):
             assert state["forms"][kind]["rows"]["Temperature"] == {
-                "use": True, "start": "", "end": "", "surface": False, "bottom": False, "water_column": False, "how": "",
+                "use": False, "start": "", "end": "", "surface": False, "bottom": False, "water_column": False, "how": "",
                 "window": "1", "show": "absolute",
             }
-        assert state["forms"]["phenology"]["rows"]["Chlorophyll"] == {"use": True, "start": "", "end": ""}
+        assert state["forms"]["phenology"]["rows"]["Chlorophyll"] == {"use": False, "start": "", "end": ""}
         assert state["forms"]["climatology"]["thickness"] == ""
         assert state["cores"] == "" and state["missing"] == {"from": "", "to": ""}
         # nor whether the report has code to reproduce its figures
@@ -646,7 +646,7 @@ class TestMapChanges:
     def test_the_pop_out_starts_with_every_variable_ticked_and_nothing_else(self, app, sim):
         state = to_options(app)
         assert state["forms"]["map_changes"]["rows"]["Temperature"] == {
-            "use": True, "plot": "", "change": "", "surface": False, "bottom": False, "water_column": False, "how": "",
+            "use": False, "plot": "", "change": "", "surface": False, "bottom": False, "water_column": False, "how": "",
             **{f"{period}_{end}": "" for period in ("historical", "future1", "future2") for end in ("start", "end")},
         }
         assert state["forms"]["map_changes"]["thickness"] == ""
@@ -780,7 +780,7 @@ class TestTransects:
         }
         # each variable has transects of its own
         assert state["forms"]["transects"] == {
-            "rows": {name: {"use": True, "transects": [blank]} for name in ("Chlorophyll", "Temperature")},
+            "rows": {name: {"use": False, "transects": [blank]} for name in ("Chlorophyll", "Temperature")},
             "thickness": "",
         }
         assert state["chosen"]["transects"] is None
@@ -1022,14 +1022,13 @@ def test_analyze_in_a_browser(browser, tmp_path):
         # nothing to remove yet
         assert page.is_hidden("#clim-remove")
         assert page.locator("#clim-dialog .picker__foot button:visible").all_inner_texts() == ["Cancel", "Confirm"]
-        # the variable is ticked to start with, and nothing else is chosen; one variable has no All variables row
-        assert use.is_checked() and not surface.is_checked()
+        # nothing is ticked to start with; one variable has no All variables row
+        assert not use.is_checked() and not surface.is_checked()
         assert page.locator("#clim-all > tr").count() == 0
         assert "required" in page.inner_text("#clim-dialog thead").lower()
         assert page.is_enabled("#clim-confirm") and page.inner_text("#clim-msg") == ""
         assert page.locator("#clim-body input.is-year").first.get_attribute("placeholder") == "2013"
-        # with the variable unticked there is nothing to confirm, and a layer ticked ticks it again
-        use.uncheck()
+        # with the variable unticked there is nothing to confirm, and a layer ticked ticks it
         assert page.is_disabled("#clim-confirm") and "Tick at least one variable" in page.inner_text("#clim-msg")
         surface.check()
         assert use.is_checked() and page.is_enabled("#clim-confirm")
@@ -1237,9 +1236,10 @@ def test_map_changes_in_a_browser(browser, tmp_path):
 
         page.click("#ao-map_changes")
         page.wait_for_selector("#chg-dialog:not([hidden])")
-        # the variable is ticked to start with
-        assert page.is_hidden("#chg-remove") and page.is_enabled("#chg-confirm")
-        assert page.locator("#chg-body > tr.chg-main").first.locator("input[type=checkbox]").first.is_checked()
+        # the variable is not ticked to start with
+        assert page.is_hidden("#chg-remove") and page.is_disabled("#chg-confirm")
+        assert not page.locator("#chg-body > tr.chg-main").first.locator("input[type=checkbox]").first.is_checked()
+        page.locator("#chg-body > tr.chg-main").first.locator("input[type=checkbox]").first.check()
         main = page.locator("#chg-body > tr.chg-main").first
         years = main.locator("input.is-year")
         assert years.count() == 6
@@ -1302,11 +1302,11 @@ def test_map_changes_in_a_browser(browser, tmp_path):
         app.close()
 
 
-def open_analyze_option(browser, tmp_path, years, option, dialog, rows=(("Temperature", "thetao"),)):
+def open_analyze_option(browser, tmp_path, years, option, dialog, rows=(("Temperature", "thetao"),), daily=True):
     """The pop-out of an Analyze option (its button `ao-<option>`, its
     dialog id) of a simulation of years, for the variables rows (name, model
-    variable): (the page, the app, the errors)."""
-    write_analysis_simulation(str(tmp_path / "sim"), years=years)
+    variable): (the page, the app, the errors). With daily=False the output is monthly."""
+    write_analysis_simulation(str(tmp_path / "sim"), years=years, daily=daily)
     app = App(cwd=str(tmp_path))
     url = app.start()
     errors = []
@@ -1651,12 +1651,14 @@ def test_transects_in_a_browser(browser, tmp_path):
         page.wait_for_selector("#trans-dialog:not([hidden])")
         assert page.is_hidden("#trans-remove")
         assert page.locator("#trans-dialog .picker__foot button:visible").all_inner_texts() == ["Cancel", "Confirm"]
-        # a section for each variable, each ticked to start with, with one transect with nothing in it
+        # a section for each variable, each unticked to start with, with one transect with nothing in it
         sections = page.locator("#trans-body .transect-var")
-        assert sections.count() == 2 and page.is_enabled("#trans-confirm")
+        assert sections.count() == 2 and page.is_disabled("#trans-confirm")
         assert "north–south" in page.inner_text("#trans-dialog .transect-rule")
         temperature = sections.nth(0)
-        assert temperature.locator(".transect-var__head input[type=checkbox]").is_checked()
+        assert not temperature.locator(".transect-var__head input[type=checkbox]").is_checked()
+        for section in (temperature, sections.nth(1)):
+            section.locator(".transect-var__head input[type=checkbox]").check()
         # the transects of chlorophyll are left out
         sections.nth(1).locator(".transect-var__head input[type=checkbox]").uncheck()
         cards = temperature.locator(".transect-card")
@@ -1771,7 +1773,7 @@ TWO_VARIABLES = (("Temperature", "thetao"), ("Chlorophyll", "P1_Chl+P2_Chl"))
 def test_the_all_variables_row_sets_every_variable_in_a_browser(browser, tmp_path):
     """With more than one variable, a pop-out's table has an All variables row at the top: what is set
     there is set for every variable it applies to, a variable set otherwise has a Reset back to it, and
-    each variable's tick, ticked to start with, leaves it out."""
+    each variable's tick, unticked to start with, leaves it out."""
     page, app, errors = open_analyze_option(browser, tmp_path, (2011, 2012, 2013, 2014), "climatology", "clim-dialog",
                                             rows=TWO_VARIABLES)
     try:
@@ -1780,9 +1782,10 @@ def test_the_all_variables_row_sets_every_variable_in_a_browser(browser, tmp_pat
         rows = page.locator("#clim-body > tr")
         temperature, chlorophyll = rows.nth(0), rows.nth(1)
         ticks = lambda row: row.locator("input[type=checkbox]")
-        # every variable is ticked to start with, and so is the All variables row's tick
-        assert ticks(temperature).first.is_checked() and ticks(chlorophyll).first.is_checked()
-        assert ticks(all_row).first.is_checked()
+        # no variable is ticked to start with, nor is the All variables row's tick; ticking it ticks every variable
+        assert not ticks(temperature).first.is_checked() and not ticks(chlorophyll).first.is_checked()
+        assert not ticks(all_row).first.is_checked()
+        ticks(all_row).first.check()
         # the years and the surface, set once
         all_row.locator("input.is-year").nth(0).fill("2011")
         all_row.locator("input.is-year").nth(1).fill("2013")
@@ -2109,6 +2112,30 @@ def test_the_other_pop_outs_with_layers_have_the_info_buttons_too(browser, tmp_p
             assert page.inner_text("#example-title") == name and page.inner_text("#example-where") == title
             page.keyboard.press("Escape")
             assert page.is_hidden("#example-dialog") and page.is_visible(f"#{dialog}")
+        assert errors == []
+    finally:
+        page.close()
+        app.close()
+
+
+def test_phenology_without_daily_output_says_so_and_closes_to_the_options(browser, tmp_path):
+    page, app, errors = open_analyze_option(browser, tmp_path, (2013, 2014), "climatology", "clim-dialog", daily=False)
+    try:
+        page.click("#clim-cancel")
+        page.click("#ao-phenology")
+        page.wait_for_selector("#no-daily:not([hidden])")
+        assert "daily output" in page.inner_text("#no-daily-text")
+        assert "Temperature" in page.inner_text("#no-daily-text")
+        assert page.is_hidden("#phen-dialog")
+        page.click("#no-daily-close")
+        assert page.is_hidden("#no-daily") and page.is_hidden("#phen-dialog")
+        assert page.is_visible("#view-analyze-options")
+        assert not page.evaluate("() => document.querySelector('main').inert")
+        # Escape closes it too
+        page.click("#ao-phenology")
+        page.wait_for_selector("#no-daily:not([hidden])")
+        page.keyboard.press("Escape")
+        assert page.is_hidden("#no-daily")
         assert errors == []
     finally:
         page.close()

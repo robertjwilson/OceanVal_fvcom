@@ -250,7 +250,7 @@ def methods(info):
         "and shown beside the others, in a colour for each.",
         "**Climatology.** For each variable, the mean of each month of each year is taken first, so that a month of daily output counts as much as a month of monthly output. The climatology is the mean of each month of the year over the years chosen, and the annual mean is the mean of those monthly means. "
         "At the surface, the first value from the top of the water column that is not missing is taken, as in OceanVal's matchups. "
-        "At the bottom, the deepest value that is not missing is taken (nctoolkit's `bottom` method with `choice=\"value\"`), so in each grid cell it is that of the deepest level with water, whatever level that is. "
+        "At the bottom, the deepest value that is not missing is taken (nctoolkit's `bottom` method with `choice=\"value\"`). "
         "The water column's vertical mean weights each layer by its thickness; its depth integral multiplies each layer by its thickness and sums them, so a concentration per cubic metre becomes an amount per square metre. "
         "The maps of the simulations share one colour scale, from the 2nd to the 98th percentile of all of them.",
     ]

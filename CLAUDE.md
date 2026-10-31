@@ -93,6 +93,8 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
 
 ### Matching and recipes
 
+- **nctoolkit is imported through `oceanval/quiet_nc.py`** (`from oceanval.quiet_nc import nc`), which silences its import warnings and output (errors still raise); the report templates do the same. Scripts that must stand alone (`analysis_plots.NC_IMPORT`) wrap the import in `warnings.catch_warnings()` instead. `tests/test_quiet_nc.py` fails on a direct import.
+
 - `oceanval/matchall.py` (`matchup`) and `oceanval/gridded.py` (`gridded_matchup`) do the actual
   model↔observation matching for point and gridded data respectively; `oceanval/fvcom.py` handles
   FVCOM-specific regridding/preprocessing (deliberately excluded from coverage/docs).
@@ -318,7 +320,8 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   `vertical_integration` with the thickness, at its first time, or `fixed=True` for
   `"z_level"`; maps of the annual mean and of each month, but no domain-mean monthly line, which
   the seasonal cycles' mean seasonal cycle already gives) and/or phenology (peak day of the surface daily climatology, daily output
-  only). Each month of each year is averaged first. Everything goes in
+  only; opening the tile when no variable has daily output shows the `#no-daily` pop-out, `openNoDaily`, with a Close button back to the options
+  page, instead of the phenology pop-out). Each month of each year is averaged first. Everything goes in
   `<out_dir>/oceanval_analysis/` (`results/` netCDF + `analysis.json`, `report/` book,
   `report.html` link), which it replaces whole.
 - The peak day is worked out in `analysis.peak` from the climatology sorted by month/day,
@@ -421,9 +424,9 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   enforces), the years of every analysis must lie inside the output's (`analysis_forms._years` in the window,
   `analyze()` against `row["times"]`: a start before its first year or an end after its last is refused), and `as_missing` is applied in `_model_data` and to the thickness, as matchup
   does. **Nothing is pre-selected in the window**: the forms start empty (rows, ticks, years,
-  thickness, `how`); the years of the output are only placeholders/hints. The one exception (the user's rule,
-  2026-10-25): each variable's own tick in the pop-outs (`use`, by its name; phenology only for daily output)
-  starts ticked, so a variable is left out by unticking it, and one ticked with no layer is an error on its row.
+  thickness, `how`); the years of the output are only placeholders/hints. That includes each variable's own tick in
+  the pop-outs (`use`, by its name), which starts unticked (the user's rule, 2026-10-31, reversing one of 2026-10-25), so
+  the user ticks the variables to analyse; ticking a layer ticks it, and one ticked with no layer is an error on its row.
   With 2+ variables each pop-out's table starts with an **All variables** row (`allVariablesRow`, its own
   `<tbody class="analyze-all">` `#clim-all`/`#phen-all`/`#chg-all`, kept in `analyzeDialog.all`, never sent):
   a box set there is set in every row it applies to (`fanOut`, skipping disabled boxes, by dispatching the

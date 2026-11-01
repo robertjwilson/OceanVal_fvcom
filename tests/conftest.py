@@ -130,6 +130,37 @@ def analysed_transects_b(compared_daily, tmp_path_factory):
     )
 
 
+@pytest.fixture(scope="session")
+def compared_fvcom(tmp_path_factory):
+    """Two raw FVCOM simulations on one mesh: A, and B, which rises faster."""
+    from simulations import TREND_A, TREND_B
+    from viewer_simulations import fvcom_months
+
+    base = tmp_path_factory.mktemp("compared_fvcom")
+    return (
+        fvcom_months(str(base / "a"), trend=TREND_A),
+        fvcom_months(str(base / "b"), trend=TREND_B),
+    )
+
+
+def _analysed_fvcom(tmp_path_factory, name, sim_dir):
+    from simulations import FVCOM_COMPARE_OPTIONS
+
+    return _analysed(tmp_path_factory, name, sim_dir, **FVCOM_COMPARE_OPTIONS)
+
+
+@pytest.fixture(scope="session")
+def analysed_fvcom_a(compared_fvcom, tmp_path_factory):
+    """The FVCOM A alone, with every option (FVCOM_COMPARE_OPTIONS)."""
+    return _analysed_fvcom(tmp_path_factory, "analysed_fvcom_a", compared_fvcom[0])
+
+
+@pytest.fixture(scope="session")
+def analysed_fvcom_b(compared_fvcom, tmp_path_factory):
+    """The FVCOM B alone, with every option (FVCOM_COMPARE_OPTIONS)."""
+    return _analysed_fvcom(tmp_path_factory, "analysed_fvcom_b", compared_fvcom[1])
+
+
 def same_as_analyze(compared, analysed):
     """The results of a simulation in a comparison (compared, its folder)
     are those of analyze() of it alone (analysed, its results folder): the

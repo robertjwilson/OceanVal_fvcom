@@ -1450,3 +1450,54 @@ def test_the_domain_mask_is_asked_in_a_browser(browser, tmp_path):
         assert not errors, errors
     finally:
         app.close()
+
+
+class TestFVCOM:
+    """Raw FVCOM output (oceanval.fvcom_climatology): compared on its mesh, so there is no
+    grids step and no thickness is asked for."""
+
+    @pytest.fixture
+    def fvcom_sims(self, tmp_path):
+        from viewer_simulations import fvcom_months
+
+        months = ((2012, 1), (2012, 2), (2013, 1), (2013, 2))
+        fvcom_months(str(tmp_path / "fa"), months)
+        fvcom_months(str(tmp_path / "fb"), months, trend=2.0)
+        return "fa", "fb"
+
+    @staticmethod
+    def form(first, second):
+        return {
+            "rows": [
+                {"name": "Base run", "simdir": first, "ndown": "1", "exclude": "", "require": ""},
+                {"name": "Fine run", "simdir": second, "ndown": "1", "exclude": "", "require": ""},
+            ]
+        }
+
+    def to_variables(self, app, first, second):
+        to_sims(app)
+        assert post(app, "/api/simcompare_sims", {"form": self.form(first, second)}) == (200, {"ok": True})
+        wait_for(lambda: app._sc_all_read())
+
+    def test_the_steps_go_from_the_files_to_the_options(self, app, fvcom_sims):
+        self.to_variables(app, *fvcom_sims)
+        assert all(found["fvcom"] for found in app.sc_found.values())
+        rows = [{"name": "Temperature", "models": {"Base run": "temp", "Fine run": "temp"}}]
+        assert post(app, "/api/simcompare_variables", {"rows": rows}) == (200, {"ok": True})
+        wait_for(lambda: app._sc_checks_done())
+        assert post(app, "/api/simcompare_files") == (200, {"ok": True})
+        # a mesh is not regridded or masked: there is no grids step
+        assert app.view == "analyze_options"
+        assert app.sc_unify is None and app.sc_domain_mask is None
+        shown = state(app)["analyze"]
+        assert shown["fvcom"] is True
+        # Back from the options goes to the files, not the grids
+        assert post(app, "/api/back", {})[0] == 200
+        assert app.view == "simcompare_files"
+
+    def test_fvcom_is_not_compared_with_other_output(self, app, tmp_path, fvcom_sims, sims):
+        self.to_variables(app, fvcom_sims[0], sims[0])
+        rows = [{"name": "Temperature", "models": {"Base run": "temp", "Fine run": "thetao"}}]
+        status, reply = post(app, "/api/simcompare_variables", {"rows": rows})
+        assert status == 400 and "only with other FVCOM output" in reply["errors"]["rows"]
+        assert app.view == "simcompare_variables"

@@ -14,6 +14,7 @@ import xarray as xr
 import oceanval
 from oceanval import sim_compare
 from conftest import quietly, same_as_analyze
+from viewer_simulations import fvcom_months, fvcom_simulation
 from simulations import (
     B_LATS,
     B_LONS,
@@ -22,6 +23,7 @@ from simulations import (
     COMPARE_TRANSECT,
     COMPARE_YEARS as YEARS,
     EVERY_OPTION,
+    FVCOM_COMPARE_OPTIONS,
     TREND_A,
     TREND_B,
     write_analysis_simulation,
@@ -1053,3 +1055,108 @@ class TestDomainMask:
                 with xr.open_dataset(os.path.join(folder, name)) as ds:
                     assert (np.isfinite(ds["temperature"].values[0]) == wanted[None, :]).all()
         assert set(info["variables"][0]["kinds"]) >= {"climatology", "long_term", "seasonal", "map_changes"}
+
+
+class TestFVCOM:
+    """Raw FVCOM output (oceanval.fvcom_climatology), compared on its own mesh: two
+    simulations on one mesh, whose results must be what analyze() gives each alone."""
+
+    @staticmethod
+    def given_fvcom(sims, **changes):
+        a, b = sims
+        arguments = dict(
+            simulations=[
+                {"name": "Base run", "sim_dir": a, "n_dirs_down": 1},
+                {"name": "Warm run", "sim_dir": b, "n_dirs_down": 1},
+            ],
+            view=False,
+            cores=1,
+            **FVCOM_COMPARE_OPTIONS,
+        )
+        arguments["variables"] = {name: {"Base run": model, "Warm run": model} for name, model in arguments["variables"].items()}
+        arguments.update(changes)
+        return arguments
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def compared(cls, compared_fvcom, tmp_path_factory):
+        """The comparison with every option: (its folder, its info)."""
+        out = tmp_path_factory.mktemp("compare_fvcom")
+        return out, compare_quietly(cls.given_fvcom(compared_fvcom, out_dir=str(out)))
+
+    def test_base_run_is_what_analyze_gives(self, compared, analysed_fvcom_a):
+        out, _ = compared
+        same_as_analyze(os.path.join(results(out), "base_run"), analysed_fvcom_a[0])
+
+    def test_warm_run_is_what_analyze_gives(self, compared, analysed_fvcom_b):
+        out, _ = compared
+        same_as_analyze(os.path.join(results(out), "warm_run"), analysed_fvcom_b[0])
+
+    def test_the_comparison_says_it_is_fvcom_on_one_mesh(self, compared):
+        out, info = compared
+        assert info["fvcom"] is True and info["same_grid"] is True and info["unify"] is None
+        assert "FVCOM" in info["unify_text"] and "mesh" in info["unify_text"]
+        saved = sim_compare.load(results(out))
+        assert saved["fvcom"] is True
+        for key in ("base_run", "warm_run"):
+            with open(os.path.join(results(out), key, "analysis.json")) as file:
+                assert json.load(file)["fvcom"] is True
+
+    def test_b_rises_faster_than_a_on_the_same_cells(self, compared):
+        out, _ = compared
+        with xr.open_dataset(os.path.join(results(out), "base_run", "temperature_surface_annual.nc")) as a, xr.open_dataset(
+            os.path.join(results(out), "warm_run", "temperature_surface_annual.nc")
+        ) as b:
+            assert a["temperature"].shape == b["temperature"].shape
+            # only January and February have a second year, a trend higher, of the four months of the climatology
+            # (the mean of their two years is half of it)
+            assert np.allclose(b["temperature"].values - a["temperature"].values, (TREND_B - TREND_A) / 2 * 2 / 4, atol=1e-4)
+
+    def test_no_thickness_is_asked_for(self, compared_fvcom, tmp_path):
+        info = compare_quietly(self.given_fvcom(compared_fvcom, out_dir=str(tmp_path)))
+        assert info["variables"][0]["sims"]["Base run"]["climatology"]["layers"]["integral"]["mesh"]
+
+    def test_fvcom_is_not_compared_with_other_output(self, sims, compared_fvcom, tmp_path):
+        years = {"Temperature": {"start": 2012, "end": 2013, "surface": True}}
+        with pytest.raises(ValueError, match="FVCOM output can be compared only with other FVCOM output"):
+            oceanval.compare_simulations(
+                simulations=[
+                    {"name": "Base run", "sim_dir": sims[0], "n_dirs_down": 1},
+                    {"name": "Warm run", "sim_dir": compared_fvcom[0], "n_dirs_down": 1},
+                ],
+                variables={"Temperature": {"Base run": "thetao", "Warm run": "temp"}},
+                climatology=years, cores=1, view=False, out_dir=str(tmp_path),
+            )
+
+    def test_the_simulations_must_share_a_mesh(self, tmp_path):
+        degrees = fvcom_months(str(tmp_path / "degrees"), months=((2012, 1),))
+        metres = fvcom_simulation(str(tmp_path / "metres"), cartesian=True)
+        with pytest.raises(ValueError, match="is not that of Base run"):
+            oceanval.compare_simulations(
+                simulations=[
+                    {"name": "Base run", "sim_dir": degrees, "n_dirs_down": 1},
+                    {"name": "Warm run", "sim_dir": metres, "n_dirs_down": 0},
+                ],
+                variables={"Temperature": "temp"},
+                climatology={"Temperature": {"start": 2012, "end": 2012, "surface": True}},
+                cores=1, view=False, out_dir=str(tmp_path / "out"),
+            )
+
+    @pytest.mark.parametrize(
+        "extra, message",
+        [
+            ({"unify": {"baseline": "Base run"}}, "unify does not work with FVCOM output"),
+            ({"unit_conversions": {"Temperature": {"Warm run": {"multiplier": 1, "adder": 0}}}}, "unit_conversions do not work with FVCOM output"),
+        ],
+    )
+    def test_what_cannot_be_done_to_a_mesh_is_refused(self, compared_fvcom, tmp_path, extra, message):
+        arguments = self.given_fvcom(compared_fvcom, out_dir=str(tmp_path), **extra)
+        with pytest.raises(ValueError, match=message):
+            oceanval.compare_simulations(**arguments)
+
+    def test_a_domain_mask_is_refused(self, compared_fvcom, tmp_path):
+        mask = str(tmp_path / "mask.nc")
+        TestDomainMask.write_mask(mask)
+        arguments = self.given_fvcom(compared_fvcom, out_dir=str(tmp_path / "out"), domain_mask=mask)
+        with pytest.raises(ValueError, match="domain_mask does not work with FVCOM output"):
+            oceanval.compare_simulations(**arguments)

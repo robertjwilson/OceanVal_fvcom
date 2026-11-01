@@ -762,14 +762,6 @@ class TestWhatIsRefused:
             analyze(fvcom_sim, tmp_path / "out", variables={"Plus": "temp+zeta"}, climatology=None,
                     long_term={"Plus": dict(years, water_column="mean")})
 
-    def test_compare_simulations_still_refuses_fvcom(self, fvcom_sim, tmp_path, no_report):
-        with pytest.raises(ValueError, match="compare_simulations does not work with FVCOM output yet"):
-            oceanval.compare_simulations(
-                simulations={"One": {"sim_dir": fvcom_sim, "n_dirs_down": 1}, "Two": {"sim_dir": fvcom_sim, "n_dirs_down": 1}},
-                variables={"Temperature": {"One": "temp", "Two": "temp"}},
-                climatology={"Temperature": SURFACE}, cores=1, view=False, out_dir=str(tmp_path / "out"),
-            )
-
 
 class TestMaps:
     @pytest.fixture
@@ -921,6 +913,8 @@ def test_the_thickness_is_not_asked_for_in_a_browser(browser, tmp_path):
         # a vertical transect does not ask for it either
         page.click("#ao-transects")
         page.wait_for_selector("#trans-dialog:not([hidden])")
+        # a variable is unticked to start with
+        page.locator("#trans-body .transect-var__head input[type=checkbox]").first.check()
         card = page.locator("#trans-body .transect-card").first
         card.locator("input[type=checkbox]").nth(1).check()
         assert page.is_hidden("#trans-thickness-row") and page.is_visible("#trans-fvcom-thickness")

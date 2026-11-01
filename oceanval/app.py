@@ -65,7 +65,7 @@ import traceback
 import urllib.parse
 
 import oceanval
-from oceanval import leftovers, live, netcdf_lock, prompts, recipes_gui
+from oceanval import domain_mask, leftovers, live, netcdf_lock, prompts, recipes_gui
 from oceanval.app_child import ANSWER_MARKER, PROGRESS_MARKER, QUESTION_MARKER
 from oceanval.analysis_app import SIMCOMPARE, AnalyzeSteps
 from oceanval.sim_compare_app import SimCompareSteps
@@ -75,9 +75,8 @@ from oceanval import sim_compare
 from oceanval import analysis
 from oceanval import analysis_report
 from oceanval import data_store
-from oceanval import depths, model_check, output_years, own_data, recipe_checks, recipe_forms, selection, time_res, time_stamps, transects, units, user_cache, user_recipes, user_settings
+from oceanval import cdo_check, depths, model_check, output_years, own_data, recipe_checks, recipe_forms, selection, time_res, time_stamps, transects, units, user_cache, user_recipes, user_settings
 from oceanval.create_recipes import (
-    DEFAULT_EXCLUDE,
     DOMAIN_REGIONS,
     POINT_RECIPE_CATALOGUE,
     RECIPE_CATALOGUE,
@@ -119,7 +118,7 @@ def builtin_datasets():
                 {
                     "point": point,
                     "region": _POINT_DATASET_REGION if point else _DATASET_REGIONS.get(region, region),
-                    "variable": note["title"],
+                    "variable": user_recipes.display_name(entry["variable"], note["title"]),
                     "recipe": entry["recipe"],
                     "dataset": note["dataset"],
                     "url": _DATASET_URLS.get(entry["recipe"], note["url"]),
@@ -250,13 +249,6 @@ DEMO_MODELS = {
 DEMO_FOLDER = "oceanval_demo"
 DEMO_YEAR = 2010
 
-# what the demo fills in in the create_recipes window: its year, for the
-# climatologies and, as each dataset starts with it (see show_recipes), the rest
-DEMO_RECIPE_SETTINGS = {
-    "clim_start": str(DEMO_YEAR),
-    "clim_end": str(DEMO_YEAR),
-}
-
 # the limits the demo's models' grids are matched up within, which matchup is
 # given with the cores, once the matchups are confirmed
 DEMO_LIMITS = {
@@ -275,24 +267,30 @@ def default_setup_form():
         "domain": "",
         "start": "",
         "end": "",
-        # restart files are not left out unless asked, so the window starts by asking
-        "exclude": DEFAULT_EXCLUDE,
+        "exclude": "",
         "require": "",
     }
 
 
-def default_output_form():
+def default_output_form(cwd=None):
     """The output step's boxes, the last before a matchup starts, as they
-    start: where the matchups (and the report) are saved, and the script."""
+    start: where the matchups (and the report) are saved, and the script,
+    named matchup.py, or the first of matchup1.py... that is free in cwd."""
     return {
         "out_dir": "",
         # asked only if out_dir has matchups already (see check_output): the
         # "variable/source" of those not used, replaced if this run makes them
-        # and ignored if not (the others are used, as each is to start with),
-        # and whether the user has confirmed what is done with them
+        # and ignored if not (the others are used), and whether the user has
+        # confirmed what is done with them. Until the user chooses in the grid
+        # (existing_chosen) unused is not looked at: the matchups this run makes
+        # are replaced to start with, and the others used
         "unused": [],
+        "existing_chosen": False,
         "existing_confirmed": False,
-        "out": "matchup.py",
+        "out": free_name(cwd, "matchup"),
+        # whether the user typed the script's name, the only one that is warned
+        # of when the file exists already
+        "out_typed": False,
         # matchup alone's, which has no report options to ask them with: the
         # cores (chosen every time), the spatial subset and the missing values
         "cores": "",
@@ -302,7 +300,34 @@ def default_output_form():
         "lat_max": "",
         "missing_from": "",
         "missing_to": "",
+        # whether part of the domain is masked out, by a file (see check_domain_mask)
+        "domain_mask": "no",
+        "domain_mask_path": "",
     }
+
+
+def inspect_domain_mask(text, cwd):
+    """The domain mask in the file typed (see oceanval.domain_mask.inspect),
+    relative to cwd: (absolute path, mask, error in words for the user)."""
+    if not text:
+        return None, None, "Give the path of the netCDF file."
+    path = _path(text, cwd)
+    with netcdf_lock.LOCK:
+        mask, error = domain_mask.inspect(path)
+    return path, mask, error
+
+
+def check_domain_mask(form, cwd, errors):
+    """matchup's domain_mask, from form's domain_mask ("yes" or "no", No to
+    start) and domain_mask_path: the absolute path of the file, or None, with
+    an error in errors if Yes has no file that is a mask."""
+    if form.get("domain_mask") != "yes":
+        return None
+    path, _, error = inspect_domain_mask(form.get("domain_mask_path", ""), cwd)
+    if error is not None:
+        errors["domain_mask_path"] = error
+        return None
+    return path
 
 
 def default_validate_form():
@@ -336,6 +361,9 @@ def default_validate_form():
         "cores": "",
         "missing_from": "",
         "missing_to": "",
+        # whether part of the domain is masked out, by a file (see check_domain_mask)
+        "domain_mask": "no",
+        "domain_mask_path": "",
     }
 
 
@@ -470,6 +498,17 @@ def _path(text, cwd):
     """A path typed into the page, which is relative to the directory the
     app works in."""
     return os.path.normpath(os.path.join(cwd, os.path.expanduser(text)))
+
+
+def free_name(cwd, stem, extension=".py"):
+    """The first of stem.py, stem1.py, stem2.py... that does not exist in cwd:
+    the name a script starts with, so an earlier one is not written over
+    unless the user types its name."""
+    name, number = stem + extension, 0
+    while os.path.lexists(os.path.join(cwd or ".", name)):
+        number += 1
+        name = f"{stem}{number}{extension}"
+    return name
 
 
 def _shown(path, cwd):
@@ -709,11 +748,13 @@ def check_output(form, cwd, report=True, demo_dir=None, made=None):
     the script, and matchup's overwrite and validate's previous.
 
     If out_dir has matchups already, the user says of each whether it is used
-    (as each is to start with), or not (unused): one this run makes (see
-    matchups_asked_about) is then replaced (matchup's overwrite), and one it
-    does not make is ignored, left out of the report (validate's previous).
+    or not (unused): one this run makes (see matchups_asked_about) is then
+    replaced (matchup's overwrite), and one it does not make is ignored, left
+    out of the report (validate's previous). Until the user has chosen
+    (existing_chosen) those this run makes are replaced and the others used.
     Only one used is kept as it is, and validated if a report follows
-    (report). The user must tick to confirm it, as each starts on use.
+    (report). The user must tick to confirm it, as they may not notice what
+    each starts on.
     Without matchups to ask about, overwrite and previous are True. In
     demo_dir, the demo's own, where every model tried keeps its matchups,
     nothing is asked: this run's are made again and no others are in the
@@ -732,13 +773,13 @@ def check_output(form, cwd, report=True, demo_dir=None, made=None):
         # each "variable/source" the page has a row for
         rows = matchups_asked_about(out_dir, made, report)
         keys = [row["key"] for row in rows]
-        unused = set(form["unused"])
+        again = [row["key"] for row in rows if row["made"]]
+        unused = set(form["unused"] if form["existing_chosen"] else again)
         if not keys:
             arguments["overwrite"] = arguments["previous"] = True
         elif out_dir == demo_dir:
             arguments["overwrite"], arguments["previous"] = True, not report
         else:
-            again = [row["key"] for row in rows if row["made"]]
             arguments["overwrite"] = _ticked_of(unused, again)
             # with a report, only those used are in it as they are
             arguments["previous"] = (
@@ -1648,7 +1689,7 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
         # "variable/source" (lower case) of the matchups the run makes, and
         # what matchup is given along with yes (see _yes): out_dir, overwrite
         # and cores, or None until it is carried on from
-        self.output_form = dict(default_output_form(), out_dir=self.cwd)
+        self.output_form = dict(default_output_form(self.cwd), out_dir=self.cwd)
         self.output_made = None
         self._run_output = None
         # where the recipes window writes its script, which the output step
@@ -1730,6 +1771,13 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
         # the years the output of the simulation in the simulation step covers,
         # read from its files' times as it is typed in (see _read_output_years)
         self._output_years = None
+        # `cdo sinfo` on every file of the simulation(s) chosen, in the background
+        # (see _start_cdo_check): the simulations it is for, the check, and what the
+        # page is told. A file it crashes on stops everything (see _cdo_fault)
+        self._cdo_key = None
+        self._cdo_check = None
+        self._cdo_number = 0
+        self._cdo_failed = None
         self.run = None
         self.run_label = None
         self.status = None
@@ -1827,7 +1875,11 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
         that the browser keeps no timer going. Returns whether it closed.
         connected says whether the page is still there to be answered."""
         deadline = time.monotonic() + hold
-        while not self.closed.is_set() and (connected is None or connected()):
+        while (
+            not self.closed.is_set()
+            and self._cdo_failed is None
+            and (connected is None or connected())
+        ):
             self.touch(page)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1972,8 +2024,6 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
                 # values are assumed to be 0 where they are asked, with the cores
                 "nemo_ersem": self._recipes is not None
                 and recipes_gui.is_likely_nemo_ersem(self._recipes.available),
-                # what the boxes of the files to skip start with, shown as OceanVal's own until changed
-                "default_exclude": DEFAULT_EXCLUDE,
                 # for the lists of how many cores to use
                 "cpu_count": os.cpu_count(),
                 "point_time_res": self._point_time_res_state(),
@@ -1982,6 +2032,7 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
                 "analyze": self._analyze_state(),
                 "simcompare": self._simcompare_state(),
                 "viewer": self._viewer_state(),
+                "cdo_check": self._cdo_check_state(),
                 "leftovers": {
                     "asked": self.leftovers_asked,
                     "count": len(self.leftovers),
@@ -1994,7 +2045,6 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
                 "datasets": BUILTIN_DATASETS,
                 "user_settings": {
                     "values": dict(self.settings),
-                    "themes": [[key, label] for key, label in user_settings.THEMES.items()],
                     "path": user_settings.path(),
                     "data_store": data_store.panel(self.settings),
                 },
@@ -2037,7 +2087,7 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
                     "server_trouble": self._server_trouble_state(),
                     "analysis": self._analysis_progress_state(),
                     # whether Back can leave it for the units step
-                    "back": self._run_back(),
+                    "back": self._run_back() or self._failed_back(),
                     # the file filters the script was written with, which
                     # the matchups page can change
                     "filters": self._run_filters(),
@@ -2650,6 +2700,22 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
                 self._units_back = True
                 self._units_done.set()
                 return True
+            if self._failed_back():
+                # nothing is running, so there is nothing to stop
+                page = self._recipes
+                self._leave_run()
+                self.interim = None
+                self.report_arguments = None
+                self.returncode = None
+                self.console.clear()
+                self._show_units(page.result)
+                threading.Thread(
+                    target=self._units_again,
+                    args=(page,),
+                    name="oceanval-units",
+                    daemon=True,
+                ).start()
+                return True
             if self._run_back():
                 question = self.question
                 if question is not None and question.time_shift:
@@ -2809,7 +2875,7 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
         self.demo = None
         self._demo_cancel.set()
         self.setup_form = default_setup_form()
-        self.output_form = dict(default_output_form(), out_dir=self.cwd)
+        self.output_form = dict(default_output_form(self.cwd), out_dir=self.cwd)
         self.validate_form = default_validate_form()
 
     def demo_download(self, model=None, variables=None):
@@ -3018,6 +3084,7 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
             run, self.run = self.run, None
             page, self.recipes_page = self.recipes_page, None
             reading, self._output_years = self._output_years, None
+            self._drop_cdo_check()
             self._own_sim = None
             self._own_sim_number += 1
             draft, self._draft_dir = self._draft_dir, None
@@ -3040,7 +3107,7 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
             self.out_dir = self.cwd
             self.overwrite = True
             self.previous = True
-            self.output_form = dict(default_output_form(), out_dir=self.cwd)
+            self.output_form = dict(default_output_form(self.cwd), out_dir=self.cwd)
             self.output_made = None
             self._run_output = None
             self.own_data = {"point": [], "gridded": []}
@@ -3127,6 +3194,7 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
             # written where the output step says, once it is carried on from
             arguments["out"] = self._draft_script()
             self.setup_arguments = arguments
+            self._start_cdo_check([arguments])
             self.view = "own_data"
             if self.demo is None:
                 self._read_own_simulation(arguments)
@@ -3846,12 +3914,6 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
         page.form["cores"] = "1"
         # the years to choose from, read from the output's times
         page.context["output_years"] = self.output_years_of(_simulation(page.context))
-        if self.demo is not None:
-            page.form.update(DEMO_RECIPE_SETTINGS)
-            # marked as OceanVal's in the window
-            page.context["app"]["prefilled"] = list(DEMO_RECIPE_SETTINGS)
-            # the years each dataset ticked starts with, in red and bold
-            page.context["app"]["initial_years"] = [DEMO_YEAR, DEMO_YEAR]
         with self._lock:
             self._recipes = page
             # not asked again, while the simulation is read from the same files
@@ -4226,6 +4288,7 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
                     errors["cores"] = error
                 matchup, matchup_errors = check_matchup_boxes(self.output_form)
                 errors.update(matchup_errors)
+                matchup["domain_mask"] = check_domain_mask(self.output_form, self.cwd, errors)
             if errors:
                 self._notify()
                 return 400, {"ok": False, "errors": errors}
@@ -4245,10 +4308,7 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
             if report:
                 self.view = "report_options"
             else:
-                self._run_output.update(cores=cores, **matchup)
-                self._keep_in_script(cores=cores, **matchup)
-                self.view = "running"
-                self.question = None
+                self._match_up_now(cores, matchup)
             writer = self._script_writer
             self._notify()
         # where the user said, now that it is named
@@ -4258,6 +4318,43 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
         self.console.write("y\n")
         question.respond(self._yes({}, question))
         return 200, {"ok": True}
+
+    def domain_mask_map(self, text):
+        """The map of the domain mask in the file typed (see
+        check_domain_mask), for the output step or the report options (or
+        Compare simulations' grids step):
+        {"ok", "item" (a Bokeh json_item), "notes", "kept", "total"} (the
+        cells kept, of all), or {"ok": False, "error"}. Returns the HTTP
+        status and the reply."""
+        from oceanval import grid_align, viewer_plots
+
+        with self._lock:
+            # Compare simulations asks it on its grids step, where no matchups are held
+            compare = self.view == "simcompare_grids"
+            if not compare and (self.view not in ("output", "report_options") or self._held_matchups() is None):
+                return 409, {"ok": False, "error": "This step is over."}
+        _, mask, error = inspect_domain_mask(str(text or "").strip(), self.cwd)
+        if error is not None:
+            return 200, {"ok": False, "error": error}
+        try:
+            kept, total = domain_mask.cells(mask)
+            item, notes, _ = viewer_plots.map_plot(
+                mask, grid_align.about(mask), "Domain mask",
+                cmap="Blues", vmin=0, vmax=1, coast=viewer_plots.has_geoviews(),
+            )
+        except Exception as problem:  # noqa: BLE001 - told to the page
+            traceback.print_exc()
+            return 200, {"ok": False, "error": f"The file could not be drawn: {type(problem).__name__}: {problem}"}
+        return 200, {"ok": True, "item": item, "notes": notes, "kept": kept, "total": total}
+
+    def _match_up_now(self, cores, matchup):
+        """Matchup alone carries on, with the cores, the spatial subset and
+        the missing values (see check_matchup_boxes), sent along with yes,
+        which the caller then answers. Called with the lock held."""
+        self._run_output.update(cores=cores, **matchup)
+        self._keep_in_script(cores=cores, **matchup)
+        self.view = "running"
+        self.question = None
 
     def validate(self, form):
         """Build the report, from the report options step's boxes."""
@@ -4343,6 +4440,19 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
                 or self._held_matchups() is not None
                 or (self.question is not None and self.question.time_shift)
             )
+        )
+
+    def _failed_back(self):
+        """Whether Back can leave a run that failed (or was stopped), in the
+        matchup or the report, for the units step, as it can the matchups
+        question: the choices made since are still kept."""
+        return (
+            self.view == "finished"
+            and self.status in ("failed", "stopped")
+            and self.action in ("matchup_validate", "matchup")
+            and self.run is not None
+            and self._recipes is not None
+            and not self.matchup_script_saved
         )
 
     def _leave_run(self):
@@ -4666,6 +4776,7 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
             report.pop("lat_lim", None)
             matchup, matchup_errors = check_matchup_boxes(form)
             errors.update(matchup_errors)
+            matchup["domain_mask"] = check_domain_mask(form, self.cwd, errors)
         if variables is not None and not errors:
             # the earlier matchups chosen for the report are not listed here,
             # so stay in it whatever is unticked
@@ -4728,6 +4839,16 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
             return 400, {"ok": False, "errors": errors}
         with self._lock:
             if self.view != "report_options":
+                return 409, {"ok": False, "error": "This step is over."}
+        return self._match_up_and_validate("report_options", report, cores, matchup)
+
+    def _match_up_and_validate(self, view, report, cores, matchup):
+        """Carry on from view (the report options) with the report options
+        (see _checked_report): matchup carries on and builds the interim
+        report - or, if it has run already, the report is built. Returns the HTTP status and
+        the reply for the page."""
+        with self._lock:
+            if self.view != view:
                 return 409, {"ok": False, "error": "This step is over."}
             # so that a second click does nothing more
             self.view = "running"
@@ -4881,6 +5002,97 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
                     found["output_key"] = _output_key(key)
                     self._read_output_years(key, paths)
         return found
+
+    # ---- `cdo sinfo` on the simulation's files ----
+
+    def _start_cdo_check(self, simulations):
+        """Run `cdo sinfo` on every output file of simulations (dicts with simdir,
+        ndown and, if any, exclude and require), in the background, unless that
+        is being done or done already for them. What was checked for others is
+        stopped and forgotten. A file it segfaults on blocks the window (see
+        _cdo_fault). Called with the lock held."""
+        key = tuple(_simulation(simulation) for simulation in simulations)
+        if not cdo_check.ENABLED or self._cdo_key == key:
+            return
+        self._drop_cdo_check()
+        self._cdo_key = key
+        number = self._cdo_number
+        threading.Thread(
+            target=self._cdo_run, args=(number, list(simulations)), name="oceanval-cdo-check", daemon=True
+        ).start()
+
+    def _cdo_run(self, number, simulations):
+        """Find the files and start their check (see _start_cdo_check)."""
+        from oceanval.viewer_catalogue import viewer_paths
+
+        paths = []
+        try:
+            for simulation in simulations:
+                paths += viewer_paths(
+                    simulation["simdir"],
+                    simulation["ndown"],
+                    simulation.get("exclude") or None,
+                    simulation.get("require") or None,
+                )
+        except Exception:
+            return
+        if not paths:
+            return
+        check = cdo_check.Check(
+            paths,
+            on_fault=lambda path: self._cdo_fault(number),
+            done=lambda finished: self._cdo_fault(number) if finished.faulty else None,
+        )
+        with self._lock:
+            if number != self._cdo_number or self.closed.is_set():
+                return
+            self._cdo_check = check
+            self._notify()
+        check.start()
+
+    def _cdo_fault(self, number):
+        """CDO segfaulted on a file: from here nothing can be done with the
+        simulation. The run going, if any, is stopped, and the page says what
+        is wrong and offers only to start again. Called again when every file
+        has been looked at, to say how many."""
+        with self._lock:
+            check = self._cdo_check
+            if number != self._cdo_number or check is None or self.closed.is_set():
+                return
+            self._cdo_failed = check.message()
+            run = self.run if self.status in ("starting", "running") else None
+            # the recipes window makes no state requests: it is left (see heartbeat)
+            page = self.recipes_page if self.view in ("preparing", "recipes") else None
+            self._notify()
+        if run is not None:
+            run.stop()
+        if page is not None:
+            page.cancel()
+
+    def _drop_cdo_check(self):
+        """Stop the check of the files, if there is one, and forget what it
+        found. Called with the lock held."""
+        check, self._cdo_check = self._cdo_check, None
+        self._cdo_key = None
+        self._cdo_failed = None
+        self._cdo_number += 1
+        if check is not None:
+            check.cancel()
+
+    def _cdo_check_state(self):
+        """What the page is told of the check of the files with CDO: whether it
+        is going, and, once a file has crashed it, what to tell the user. The
+        page then allows nothing but starting again."""
+        check = self._cdo_check
+        if check is None:
+            return None
+        return {
+            "status": "done" if check.finished else "checking",
+            "total": check.total,
+            "faulty": check.faulty,
+            "message": self._cdo_failed,
+            "link": cdo_check.LINK,
+        }
 
     # ---- the years of the simulation's output ----
 
@@ -5079,7 +5291,8 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
             told=lambda news: self._matchup_news(run, news),
         )
         with self._lock:
-            if self.closed.is_set():
+            if self.closed.is_set() or self._cdo_failed is not None:
+                # nothing is run on files CDO crashes on
                 return
             self.run = run
             self.run_label = label
@@ -5339,6 +5552,7 @@ class App(AnalyzeSteps, SimCompareSteps, ViewerSteps):
             self._cancel_register_check()
             self._drop_model_check()
             self._drop_analyze_check()
+            self._drop_cdo_check()
             reading, self._output_years = self._output_years, None
             viewed = self._viewer_drop()
             self._notify()
@@ -5495,7 +5709,9 @@ class _Handler(recipes_gui._Handler):
                 {
                     "closed": self.app.heartbeat(
                         query.get("page"), connected=self._connected
-                    )
+                    ),
+                    # CDO crashed on the simulation's files: the main page says so
+                    "blocked": self.app._cdo_failed is not None,
                 },
             )
         elif url.path == "/api/state":
@@ -5628,11 +5844,23 @@ class _Handler(recipes_gui._Handler):
         if path == "/api/simcompare_variables":
             self._reply_json(*app.simcompare_variables(payload.get("rows")))
             return
+        if path == "/api/simcompare_units":
+            self._reply_json(*app.simcompare_units(payload.get("conversions"), payload.get("confirmed")))
+            return
         if path == "/api/simcompare_files":
             self._reply_json(*app.simcompare_files())
             return
         if path == "/api/simcompare_grids":
             self._reply_json(*app.simcompare_grids(payload.get("form")))
+            return
+        if path == "/api/simcompare_panel":
+            self._reply_json(*app.simcompare_panel(payload.get("number")))
+            return
+        if path == "/api/simcompare_generate":
+            self._reply_json(*app.simcompare_generate(payload.get("form")))
+            return
+        if path == "/api/domain_mask":
+            self._reply_json(*app.domain_mask_map(payload.get("path")))
             return
         if path == "/api/analyze_option":
             self._reply_json(*app.analyze_option(payload.get("kind"), payload.get("form")))
@@ -5762,6 +5990,11 @@ class _Handler(recipes_gui._Handler):
 
 def main(argv=None):
     """The oceanval command."""
+    # OCEANVAL_TRACE_SEMAPHORES: where to record what made each semaphore, to
+    # find the owner of one the resource tracker says leaked (see the module)
+    from oceanval import semaphore_trace
+
+    semaphore_trace.install_from_environment()
     parser = argparse.ArgumentParser(
         prog="oceanval",
         description=(

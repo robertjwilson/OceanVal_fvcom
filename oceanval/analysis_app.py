@@ -134,8 +134,8 @@ class AnalyzeSteps:
         self.analyze_missing_probed = False
         self._analyze_probe_number = 0
         # whether the report has code to reproduce its figures, "yes" or
-        # "no": it must be answered, and nothing is chosen for the user
-        self.analyze_figure_code = ""
+        # "no": not required, and "no" to start with
+        self.analyze_figure_code = "no"
 
     # ---- the simulation ----
 
@@ -154,6 +154,7 @@ class AnalyzeSteps:
                 self.analyze_found is not None and self.analyze_found["status"] != "failed"
             )
             self.analyze_setup = arguments
+            self._start_cdo_check([arguments])
             self.view = "analyze_variables"
             if not same:
                 self._forget_after_simulation()
@@ -171,6 +172,16 @@ class AnalyzeSteps:
         self._analyze_shift_number += 1
         self._analyze_probe_number += 1
         self._drop_analyze_check()
+        # the pop-outs' boxes (years, thickness, regions, transects) and the missing
+        # values were the other simulation's
+        self.analyze_forms = {kind: None for kind in KINDS}
+        self.analyze_chosen = {kind: None for kind in KINDS}
+        self.analyze_thickness = None
+        self.analyze_area = analysis_forms.default_area()
+        self.analyze_times_dir = None
+        self.analyze_missing = {"from": "", "to": ""}
+        self._analyze_missing_set = False
+        self.analyze_missing_probed = False
 
     def _analyze_form(self, form):
         from oceanval.app import _form
@@ -211,6 +222,7 @@ class AnalyzeSteps:
                 arguments.get("exclude"),
                 arguments.get("require"),
                 progress=progress,
+                stopped=lambda: number != self._analyze_reading,
             )
             if not found:
                 error = "No netCDF files OceanVal could read were found."
@@ -767,7 +779,7 @@ class AnalyzeSteps:
         if isinstance(form, dict):
             kept = _form(form, analysis_forms.default_setup_form(self.cwd))
             self.analyze_setup_form = dict(
-                self.analyze_setup_form, **{name: kept[name] for name in ("out_dir", "out", "replace_analysis")}
+                self.analyze_setup_form, **{name: kept[name] for name in ("out_dir", "out", "out_typed", "replace_analysis")}
             )
         return analysis_forms.check_output(self.analyze_setup_form, self.cwd)
 
@@ -785,8 +797,14 @@ class AnalyzeSteps:
         """Back from an Analyze step, keeping what its boxes hold. Called
         with the lock held. Returns None if the view is not one of them."""
         if self.view == "analyze_variables":
-            if isinstance(sent.get("rows"), list):
+            # rows made before the read was in are not the user's
+            if isinstance(sent.get("rows"), list) and (self.analyze_found or {}).get("status") == "done":
                 self.analyze_rows = analysis_forms.clean_rows(sent["rows"])
+            # a read still going is of no use if another directory is chosen next
+            if (self.analyze_found or {}).get("status") == "reading":
+                self._analyze_reading += 1
+                self.analyze_found = None
+                self.analyze_setup = None
             self.view = "setup"
         elif self.view == "analyze_files":
             self.view = "analyze_variables"
@@ -833,7 +851,7 @@ class AnalyzeSteps:
             "output": (
                 self.sc_output_form
                 if self.action == SIMCOMPARE
-                else {name: self.analyze_setup_form[name] for name in ("out_dir", "out", "replace_analysis")}
+                else {name: self.analyze_setup_form[name] for name in ("out_dir", "out", "out_typed", "replace_analysis")}
             ),
             "rows": self.analyze_rows,
             "refilled": self.analyze_refilled,

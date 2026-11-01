@@ -34,12 +34,12 @@ import shutil
 import warnings
 import webbrowser
 
-import nctoolkit as nc
+from oceanval.quiet_nc import nc
 import numpy as np
 import pandas as pd
 import xarray as xr
 
-from oceanval import netcdf_lock, prompts, sim_unify, surface
+from oceanval import cdo_check, domain_mask, netcdf_lock, prompts, sim_unify, surface
 from oceanval import time_res as time_resolution
 from oceanval.create_recipes import _file_pattern, _looks_like_fvcom, simulation_paths
 from oceanval.matchall import _restores_nctoolkit_options
@@ -459,7 +459,7 @@ def _read_variables_of(path):
     return found
 
 
-def streams(sim_dir, n_dirs_down, exclude=None, require=None, progress=None):
+def streams(sim_dir, n_dirs_down, exclude=None, require=None, progress=None, stopped=None):
     """The output streams of a simulation: its files n_dirs_down directories
     below sim_dir that the filters keep (see
     create_recipes.simulation_paths), grouped by their names with the dates
@@ -470,12 +470,15 @@ def streams(sim_dir, n_dirs_down, exclude=None, require=None, progress=None):
           "units", "levels"}}, "fvcom": whether it is raw FVCOM output}]
 
     sorted by pattern. A stream whose first file cannot be read is left out.
-    progress(done, total) is called as the streams are read."""
+    progress(done, total) is called as the streams are read, and the read
+    ends early, with what it has, once stopped() is true."""
     grouped = {}
     for path in simulation_paths(sim_dir, n_dirs_down, exclude, require):
         grouped.setdefault(_file_pattern(path), []).append(path)
     found = []
     for done, (pattern, files) in enumerate(sorted(grouped.items())):
+        if stopped is not None and stopped():
+            break
         if progress is not None:
             progress(done, len(grouped))
         variables, fvcom = _variables_of(files[0])
@@ -604,10 +607,31 @@ def integral_units(units):
     return f"{units} m" if units else "m"
 
 
-def _model_data(files, row, years, time_shift, layer=None, levels=1):
+def second_step(files, steps_in_first):
+    """The file and the time step in it (from 0) a comparison's maps and masks are
+    made from: the output's second time step, if it has one, which is the first
+    file's second if that has more than one time, else the second file's first;
+    otherwise its first. steps_in_first is how many times files[0] has."""
+    if steps_in_first > 1:
+        return files[0], 1
+    if len(files) > 1:
+        return files[1], 0
+    return files[0], 0
+
+
+def second_step_of(row):
+    """second_step for the files of row (locate_rows's), from the times it read; the
+    first time step of the first file, if they are not known."""
+    files = row["files"]
+    times = (row.get("times") or {}).get(files[0])
+    return second_step(files, len(times)) if times is not None else (files[0], 0)
+
+
+def _model_data(files, row, years, time_shift, layer=None, levels=1, at=None):
     """The model's output of row's variable in years, from files, as a
-    dataset with one variable, named row["key"]. With years None, it is the
-    first time of the first file, which is enough to see what is missing. If
+    dataset with one variable, named row["key"]. With years None, it is one
+    time step, which is enough to see what is missing: the first of the first
+    file, or at, (file, step from 0). If
     layer is the surface or the bottom (see _pick_level), only that level is
     kept, of each part of a sum.
 
@@ -621,8 +645,9 @@ def _model_data(files, row, years, time_shift, layer=None, levels=1):
     the variables, by CDO's select, which does not read the other levels."""
     fast = layer == SURFACE and levels > 1 and bool(row.get("surface_fast"))
     if years is None:
-        ds = nc.open_data(files if isinstance(files, str) else files[0], checks=False)
-        _choose(ds, row, fast, first_step=True)
+        path, step = at if at is not None else (files if isinstance(files, str) else files[0], 0)
+        ds = nc.open_data(path, checks=False)
+        _choose(ds, row, fast, step=step)
     elif time_shift:
         ds = nc.open_data(files, checks=False)
         _choose(ds, row, fast)
@@ -649,6 +674,14 @@ def _model_data(files, row, years, time_shift, layer=None, levels=1):
         ds.cdo_command(f"-expr,{row['key']}={'+'.join(row['parts'])}")
     else:
         ds.rename({row["parts"][0]: row["key"]})
+    # a comparison's simulation in other units than the first's (see
+    # sim_compare.check_unit_conversions): converted as it is read, so that every
+    # analysis is of the converted values. Missing values stay missing
+    multiplier, adder = row.get("convert") or (1, 0)
+    if multiplier != 1:
+        ds.cdo_command(f"-mulc,{multiplier!r}")
+    if adder != 0:
+        ds.cdo_command(f"-addc,{adder!r}")
     return ds
 
 
@@ -693,10 +726,10 @@ def thickness_data(thickness, files, as_missing=None):
 CHUNK_CACHE = surface.CHUNK_CACHE
 
 
-def _choose(ds, row, fast, first_step=False):
-    """Choose the variables of row in ds, and with first_step its first time
-    step; if fast, only the surface of them too (see oceanval.surface)."""
-    surface.choose(ds, row["parts"], fast, [0] if first_step else None)
+def _choose(ds, row, fast, step=None):
+    """Choose the variables of row in ds, and with step (from 0) that time step
+    only; if fast, only the surface of them too (see oceanval.surface)."""
+    surface.choose(ds, row["parts"], fast, None if step is None else [step])
 
 
 def _chunk_cache(row, layer):
@@ -731,11 +764,12 @@ def _reduce_column(ds, layer, thickness):
             how(thickness=thickness)
 
 
-def first_step_of(files, row, layer, levels, thickness=None):
+def first_step_of(files, row, layer, levels, thickness=None, at=None):
     """The field row's variable has in one layer at the first time step of
-    files, on the model's own grid: what monthly_means_of gives, for one time."""
+    files, or at at, (file, step from 0), on the model's own grid: what
+    monthly_means_of gives, for one time."""
     with _chunk_cache(row, layer):
-        ds = _model_data(files, row, None, None, layer, levels)
+        ds = _model_data(files, row, None, None, layer, levels, at)
         with warnings.catch_warnings(record=True):
             ds.run()
             _reduce_column(ds, layer, thickness)
@@ -747,7 +781,8 @@ def monthly_means_of(files, row, layer, years, time_shift, levels, thickness=Non
     """The mean of each month of each year of row's variable in one layer
     (see LAYER_TITLES) over years, as a dataset with a time for each. If row
     has "unify" (see oceanval.sim_unify), it is on the common grid of a
-    comparison's simulations. If row has "month_per_file" (see
+    comparison's simulations, and if it has "domain_mask" (see
+    oceanval.domain_mask), it is masked, on the mask's grid. If row has "month_per_file" (see
     time_res.one_month_per_file), each file's mean is its month's, taken as
     it is read, so merging the files writes one time of each."""
     month_per_file = bool(row.get("month_per_file"))
@@ -766,6 +801,8 @@ def monthly_means_of(files, row, layer, years, time_shift, levels, thickness=Non
             ds.run()
     if row.get("unify"):
         sim_unify.apply(ds, row["unify"], row["key"], layer)
+    # a comparison's domain mask, which puts the simulation on the mask's grid
+    domain_mask.mask_gridded(ds, row.get("domain_mask"))
     return ds
 
 
@@ -790,6 +827,7 @@ def daily_climatology_of(files, row, years, time_shift, levels):
             ds.run()
     if row.get("unify"):
         sim_unify.apply(ds, row["unify"], row["key"], SURFACE)
+    domain_mask.mask_gridded(ds, row.get("domain_mask"))
     return ds
 
 
@@ -1359,6 +1397,10 @@ def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_
         raise ValueError(f"{refuse_fvcom} does not work with FVCOM output yet.")
     # raw FVCOM output, whose mesh CDO cannot read, by its files
     fvcom_files = {tuple(stream["files"]): bool(stream.get("fvcom")) for stream in found}
+    # CDO looks at the files while their times are read below (not FVCOM's, whose mesh it cannot read)
+    cdo_checked = cdo_check.start(
+        path for stream in found if not stream.get("fvcom") for path in stream["files"]
+    )
 
     # the time resolution of a stream is read from some of its files: once for each
     labels = {}
@@ -1452,6 +1494,8 @@ def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_
                     "it has no section through the water column to take along a transect: leave out "
                     "the vertical climatology and vertical changes of its transects."
                 )
+    # nothing is worked out from files CDO cannot read
+    cdo_check.require(cdo_checked)
     if problems:
         raise ValueError("\n".join(problems))
 

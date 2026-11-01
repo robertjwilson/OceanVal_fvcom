@@ -29,7 +29,7 @@ import re
 import textwrap
 import warnings
 
-import nctoolkit as nc
+from oceanval.quiet_nc import nc
 import xarray as xr
 
 from oceanval import prompts
@@ -487,6 +487,7 @@ MATCHUP_SETTINGS = (
     "fvcom_min_depth",
     "fvcom_max_depth",
     "fvcom_dz",
+    "domain_mask",
 )
 VALIDATE_SETTINGS = ("subregions", "pdf", "word", "concise")
 
@@ -762,12 +763,6 @@ def _passes_filters(path, exclude=None, require=None):
     return not any(word in name for word in exclude or ()) and all(
         word in name for word in require or ()
     )
-
-
-# What the oceanval window's Skip file names containing box starts with. Restart
-# files are never left out without being asked: only the file filters leave
-# files out, and the window starts them with this, for the user to remove.
-DEFAULT_EXCLUDE = "restart"
 
 
 def simulation_paths(simdir, ndown, exclude=None, require=None):
@@ -1858,7 +1853,12 @@ def _create_recipes(
         # out: the oceanval window's output step names the script after the recipes window
         selection = set(selection) - replaced
         # the window can change the years along with everything else
-        years = (settings["start"], settings["end"]) if settings else (start, end)
+        years = (start, end)
+        if settings:
+            years = (
+                None if settings["start"] is None
+                else (settings["start"], settings["end"])
+            )
         if not mapping:
             warnings.warn(
                 "No model variables could be identified, so every recipe in "

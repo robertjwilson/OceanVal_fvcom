@@ -7,7 +7,7 @@ import queue
 import sys
 import threading
 import time
-import nctoolkit as nc
+from oceanval.quiet_nc import nc
 import re
 import importlib
 import glob
@@ -33,6 +33,8 @@ from oceanval.session import session_info
 from oceanval.parsers import Validator, definitions, point_files
 from tqdm import tqdm
 from oceanval.utils import extension_of_directory
+from oceanval import cdo_check
+from oceanval import domain_mask as domain_mask_mod
 from oceanval.parsers import generate_mapping
 from oceanval.gridded import gridded_matchup, retry_failed_gridded, _lonlat_bounds
 from oceanval.fvcom import fvcom_matchup_files, fvcom_extent, fvcom_times
@@ -43,6 +45,7 @@ from oceanval.fvcom import default_max_depth as fvcom_default_max_depth
 from oceanval.fvcom import default_dz as fvcom_default_dz
 from oceanval import data_store as obs_store
 from oceanval import cdo_watch
+from oceanval import extent
 from oceanval import ices
 from oceanval import live
 from oceanval import surface
@@ -310,6 +313,21 @@ def _checked_missing(as_missing):
     elif not isinstance(as_missing, (int, float)):
         raise TypeError("as_missing must be a float, int, list or None")
     return as_missing
+
+
+def _model_box(path, model_variable):
+    """The model's extent, ([lon_min, lon_max], [lat_min, lat_max]), from the
+    cells of its first file that have values (see oceanval.extent): NEMO puts
+    the cells of the land processors it leaves out at lon -1, lat -1, so the
+    whole grid can be far larger than its domain. The whole grid if they can
+    not be told."""
+    name = re.split(r"[+,]", str(model_variable))[0].strip() or None
+    found = extent.of_file(path, name, session_info.get("as_missing"))
+    if found is None:
+        lon_min, lon_max, lat_min, lat_max = _lonlat_bounds(nc.open_data(path, checks=False))
+        return [lon_min, lon_max], [lat_min, lat_max]
+    lons = ((found[0] + 180) % 360) - 180
+    return [float(lons.min()), float(lons.max())], [float(found[1].min()), float(found[1].max())]
 
 
 def _checked_overwrite(overwrite):
@@ -1338,6 +1356,7 @@ def matchup(
     fvcom_min_depth = fvcom_default_min_depth,
     fvcom_max_depth = fvcom_default_max_depth,
     fvcom_dz = fvcom_default_dz,
+    domain_mask = None,
 ):
     """
     Match up model with observational data
@@ -1442,6 +1461,12 @@ def matchup(
         where the built-in observational data downloaded (WOA23, OCCCI, NSBC, COBE2, GLODAP and
         ICES) is kept for later matchups, used as the Preferences say. Your own data is never
         kept in it. Default is None, to use it if one is set; False does not use it for this run.
+    domain_mask : str
+        Match up only part of the domain: the path of a netCDF file with a single variable at a
+        single time step, 1 in the cells wanted and 0 or missing elsewhere. It is copied, as 1
+        and missing, to oceanval_matchups/domain_mask.nc. Gridded matchups put the model's monthly
+        means on the file's grid by nearest neighbour and keep only the cells of 1; point matchups keep only the locations that are in a
+        cell of 1, by nearest neighbour. Default is None, the whole domain.
 
     Returns
     -------------
@@ -1478,6 +1503,10 @@ def matchup(
     cores = _checked_cores(cores)
     nc.options(cores=cores)
     session_info["cores"] = cores
+
+    # kept in the matchups folder, and said so in session_info, once the matchups are confirmed
+    domain_mask = domain_mask_mod.check(domain_mask)
+    session_info["domain_mask"] = None
 
     if not isinstance(fvcom, bool):
         raise TypeError("fvcom must be a boolean")
@@ -1886,6 +1915,8 @@ def matchup(
     files = _files_found(
         sim_dir, sorted(set(chosen.pattern)), exclude, session_info["require"], strict_names
     )
+    # the files are looked at by CDO while the times are checked
+    cdo_checked = cdo_check.start(path for found in files.values() for path in found)
 
     # time means whose times look like the end of the period each covers are
     # asked about before the matchups are shown, so that the files and dates
@@ -1910,6 +1941,7 @@ def matchup(
             print("******************************")
             session_info["end_messages"].append(time_stamps.end_message(rows))
     session_info["time_shift"] = time_shift
+    cdo_check.require(cdo_checked)
     if time_shift:
         print(f"The model's times are shifted {time_stamps.describe(time_shift)} before matching up")
 
@@ -2086,6 +2118,9 @@ def matchup(
     if "lon_lim" in given or "lat_lim" in given:
         lon_lim, lat_lim = _checked_limits(given.get("lon_lim"), given.get("lat_lim"))
         session_info["lon_lim"], session_info["lat_lim"] = lon_lim, lat_lim
+    if "domain_mask" in given:
+        # the window's domain mask (see oceanval.app.check_domain_mask)
+        domain_mask = domain_mask_mod.check(given["domain_mask"])
     if "as_missing" in given:
         as_missing = _checked_missing(given["as_missing"])
         if as_missing != session_info["as_missing"]:
@@ -2098,6 +2133,7 @@ def matchup(
                 session_info["ds_thickness"] = ds_thickness_sim[0]
 
     os.makedirs(session_info["out_dir"] + "oceanval_matchups", exist_ok=True)
+    session_info["domain_mask"] = domain_mask_mod.keep(domain_mask, session_info["out_dir"] + "oceanval_matchups")
     ff_bath = session_info["out_dir"] + "oceanval_matchups/model_bathymetry.nc"
     if bathymetry is not None and not os.path.exists(ff_bath):
         bathymetry.vertical_sum()
@@ -2332,10 +2368,7 @@ def matchup(
                             if lon_lim is not None:
                                 recipe_lon, recipe_lat = lon_lim, lat_lim
                             else:
-                                lon_min, lon_max, lat_min, lat_max = _lonlat_bounds(
-                                    nc.open_data(sim_paths[0], checks=False)
-                                )
-                                recipe_lon, recipe_lat = [lon_min, lon_max], [lat_min, lat_max]
+                                recipe_lon, recipe_lat = _model_box(sim_paths[0], model_variable)
                             try:
                                 df = ices.download_point_data(
                                     comparison["recipe"],
@@ -2662,6 +2695,8 @@ def matchup(
                             df_all = df_all.query(
                                 f"lat > {lat_lim[0]} and lat < {lat_lim[1]}"
                             )
+                        # only those in the domain mask's cells of 1
+                        df_all = domain_mask_mod.mask_points(df_all, session_info["domain_mask"])
 
                         if len(df_all) > 0:
 

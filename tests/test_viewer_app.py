@@ -71,15 +71,15 @@ def test_the_tile_is_first_on_the_landing_page(app):
     page = get(app, "/")[1]
     assert 'class="choices is-four"' in page
     assert page.index('data-action="viewer"') < page.index('data-action="analyze"') < page.index('data-action="validate_menu"')
-    assert "View simulation output" in page and "Interactively view netCDF files in simulations" in page
+    assert "View simulation output" in page and "Interactively view netCDF files" in page
 
 
 def test_the_tile_goes_to_the_setup_page_and_back(app, simulation):
     assert post(app, "/api/choose", {"action": "viewer"}) == (200, {"ok": True})
     shown = get_json(app, "/api/state")[1]
     assert shown["view"] == "setup" and shown["action"] == "viewer"
-    # the setup page's boxes, with the files skipped starting as OceanVal's own
-    assert shown["setup"]["form"]["exclude"] == "restart" and shown["setup"]["form"]["missing"] == ""
+    # the setup page's boxes, with the files skipped left to the user
+    assert shown["setup"]["form"]["exclude"] == "" and shown["setup"]["form"]["missing"] == ""
     # Back keeps what was typed, for when the tile is chosen again
     form = _form(simulation, missing='[["-999", ""]]')
     assert post(app, "/api/back", {"form": form}) == (200, {"ok": True})

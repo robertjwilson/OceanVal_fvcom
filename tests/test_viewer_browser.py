@@ -53,7 +53,9 @@ def test_files_page_finds_the_depth(page, simulation):
     tab.wait_for_function("() => document.querySelector('#f-ndown').value === '2'")
     tab.wait_for_selector("#ndown-found:not(.is-finding):not([hidden])")
     assert tab.text_content("#ndown-found") == "48 netCDF files found"
-    assert "YYYY/MM/**.nc" in tab.text_content("#ndown-layout")
+    # the layout is told in a pop-out (the conftest dismisses it); the box is bold
+    assert tab.evaluate("() => getComputedStyle(document.querySelector('#f-ndown')).fontWeight") == "700"
+    assert tab.locator("#ndown-layout").count() == 0
     assert "is-detected" in tab.get_attribute("#f-ndown", "class")
     assert tab.is_enabled("#continue")
     # the files the filters leave out are not mentioned, only the number there are
@@ -82,31 +84,28 @@ def test_missing_values_on_the_files_page(page, simulation):
     assert "is-invalid" in tab.get_attribute("#missing-from-0", "class")
     assert tab.is_disabled("#continue")
     assert "not a number" in tab.text_content("#m-missing-rows")
+    # there is one From and one To, with no way to add another
     tab.fill("#missing-from-0", "-999")
-    tab.click("#missing-add")
-    tab.fill("#missing-from-1", "10")
-    tab.fill("#missing-to-1", "12.5")
-    assert tab.is_enabled("#continue")
-    # a row is removed by its button
-    tab.click("#missing-add")
-    tab.click("[aria-label='Remove missing value 3']")
-    assert tab.locator("#missing-rows .missing-rows__row").count() == 2
-    # removing the last one leaves an empty row to fill in
-    tab.click("[aria-label='Remove missing value 2']")
-    tab.click("[aria-label='Remove missing value 1']")
+    assert tab.locator("#missing-add").count() == 0
+    assert tab.locator(".missing-rows__add, .missing-rows__remove").count() == 0
     assert tab.locator("#missing-rows .missing-rows__row").count() == 1
+    tab.fill("#missing-to-0", "-900")
+    assert tab.is_enabled("#continue")
+    # clearing the From box leaves it to fill in again
+    tab.fill("#missing-from-0", "")
     assert tab.input_value("#missing-from-0") == ""
-    tab.fill("#missing-from-0", "-999")
-    tab.click("#missing-add")
-    tab.fill("#missing-from-1", "10")
-    tab.fill("#missing-to-1", "12.5")
+    tab.fill("#missing-to-0", "")
+    tab.fill("#missing-from-0", "10")
+    tab.fill("#missing-to-0", "12.5")
     tab.click("#continue")
     tab.wait_for_function("() => document.querySelector('#view-viewer:not([hidden])')", timeout=60000)
-    assert app.viewer_missing == [(-999.0, -999.0), (10.0, 12.5)]
-    # going back shows them again
+    assert app.viewer_missing == [(10.0, 12.5)]
+    # going back shows it again
     tab.click("#vw-back")
     tab.wait_for_selector("#view-setup:not([hidden])")
-    assert tab.input_value("#missing-from-1") == "10"
+    assert tab.input_value("#missing-from-0") == "10"
+    assert tab.input_value("#missing-to-0") == "12.5"
+    assert tab.locator("#missing-rows .missing-rows__row").count() == 1
 
 
 def _land_files_page(tab, root):
@@ -236,8 +235,10 @@ def test_an_ersem_simulation_has_zeros_assumed_to_be_missing(page, simulation, m
     assert tab.input_value("#missing-to-0") == "0"
     assert "is-ersem" in tab.get_attribute("#missing-from-0", "class")
     assert tab.is_visible("#missing-ersem") and tab.is_hidden("#missing-found")
-    # a row removed is the user's doing, and stays removed
-    tab.click("[aria-label='Remove missing value 1']")
+    # a row emptied is the user's doing, and stays empty
+    assert tab.locator("[aria-label='Remove missing value 1']").count() == 0
+    tab.fill("#missing-from-0", "")
+    tab.fill("#missing-to-0", "")
     assert tab.input_value("#missing-from-0") == ""
     assert "is-ersem" not in tab.get_attribute("#missing-from-0", "class")
 

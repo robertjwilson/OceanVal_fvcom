@@ -59,6 +59,10 @@ tests patch it with `raising=False`), and the report notebooks' kernels import t
 oceanval, so reinstall (`pip install --no-deps .`) before running report tests against changed code.
 `_run_filtered` waits for the process, not the end of its pipe (`_OUTPUT_GRACE`): nctoolkit's Manager
 servers in a kernel that died keep the pipe open, which hung the interim report's builder.
+"resource_tracker: There appear to be 1 leaked semaphore objects" at quit is harmless (the tracker removes it): a
+process that made a spawn-context Lock (tqdm's `create_mp_lock` does, in a forked process later killed) ended without its
+finalizers. `OCEANVAL_TRACE_SEMAPHORES=<file> oceanval` records every semaphore made (`oceanval/semaphore_trace.py`), and
+`python -m oceanval.semaphore_trace <file>` lists those never released, with the stack that made each.
 Never put conda's `lib` on `DYLD_LIBRARY_PATH` (`utils.restrict_r_to_conda` sets `LD_LIBRARY_PATH` on Linux only):
 dyld swaps libraries by file name, so ImageIO's own `libPng.dylib` became conda's libpng (the file system ignores
 case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS in `QuartzBitmap_Close`).
@@ -88,6 +92,8 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
    numbering — per-page PDF/Word exports mirror their HTML page and still number from 1.
 
 ### Matching and recipes
+
+- **nctoolkit is imported through `oceanval/quiet_nc.py`** (`from oceanval.quiet_nc import nc`), which silences its import warnings and output (errors still raise); the report templates do the same. Scripts that must stand alone (`analysis_plots.NC_IMPORT`) wrap the import in `warnings.catch_warnings()` instead. `tests/test_quiet_nc.py` fails on a direct import.
 
 - `oceanval/matchall.py` (`matchup`) and `oceanval/gridded.py` (`gridded_matchup`) do the actual
   model↔observation matching for point and gridded data respectively; `oceanval/fvcom.py` handles
@@ -149,15 +155,23 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   by `_thickness_and_depths` from `thickness_selected` when `as_missing` changes). The script is written
   under its chosen name from the output step on (`_keep_in_script(out=)`, `create_recipes`' `write(out=)`). Back:
   `report_options` → `output` → `point_time_res`/the matchups question → (Back from the run) the units step.
+  **The script's name starts as the first free one in the directory worked in**: `matchup.py`, else `matchup1.py`,
+  `matchup2.py`... (`app.free_name(cwd, stem)`, used by `default_output_form(cwd)`, `analysis_forms.default_setup_form` for
+  `analysis.py`, `sim_compare_forms.default_output_form` for `simulation_comparison.py`; made with the form, so Restart sees a script
+  an earlier run wrote). "This file already exists, and will be replaced" is shown only for a name the user typed (form `out_typed`,
+  set by the box's input event, kept for Back, in `analyze`'s `analyzeOutput.typed`). The old "There are matchups here already"
+  line under the directory box is gone, as the grid says it (the folder browser's still says `has_matchups`).
   The output step's grid, "What do you want to do with existing matchups?", has a row per "variable/source"
   (`app.matchups_asked_about`, each with `made`: whether this run matches it up, from the question's
   `details["matchups"]`, kept in `output_made`; the probe marks the rows while the view is `output`): per row one of
-  two, Use (to start with) and Replace if the run makes it, or Ignore if not (left out of the report); a row the run
-  does not make is listed only with a report to follow. Radios with the tick look; a column only for an option some
+  two, Use and Replace if the run makes it, or Ignore if not (left out of the report); **a row the run makes starts on
+  Replace and any other on Use** (the user's rule, 2026-10-30; until the user picks something, form `existing_chosen` is False and
+  `unused` is not looked at, in `check_output` and the page's `existingChoice`; `chooseExisting` makes `unused` the user's own
+  and sets it); a row the run does not make is listed only with a report to follow. Radios with the tick look; a column only for an option some
   row has; a lone radio at the top of each column chooses it for every row that has it. **Only a used matchup is kept
   as it is** (form `unused`; `check_output` gives overwrite = those replaced, of those made, previous = those used,
   all → True, none → False). A confirmation tick under the grid (`existing_confirmed`) is required, as users may not
-  notice every row starts on Use; it is reset when the list shown changes. The demo's own folder
+  notice what every row starts on; it is reset when the list shown changes. The demo's own folder
   (`check_output(demo_dir=)`, `out_dir_is_demo`), where every model tried keeps its matchups, has no grid:
   overwrite=True, previous=False.
   `previous` is never passed to the interim report
@@ -178,14 +192,16 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   `app.recipes_choices`/`recipes_restore`, the first page in a window made afresh): **Gridded data selection** (`#page-gridded`, the
   rows with gridded datasets, recipes or own) and **Point data selection** (`#page-point`, the rows with point ones, and a
   last column "Gridded data selected", `chosenCell`). A row on both has a simulation variable box on each (`row.dom.views`).
-  No meta strip (the simulation path is not shown). The standalone `create_recipes()` window keeps its other settings
+  No meta strip (the simulation path is not shown). A row with a dataset ticked on the page (or the user's own data) is tinted `--teal-50` with a teal left edge (`tr.is-selected`, set in `update(row)`). **The Environmental variable column (both pages) and the Info panel's
+  Built-in datasets tables show `user_recipes.DISPLAY_NAMES`** ("Nitrate concentration in sea water", row `display`,
+  `user_recipes.display_name`; user recipes keep their title); everything else, the report included, keeps `title`/`VARIABLE_LABELS`. The standalone `create_recipes()` window keeps its other settings
   (subset, missing values, output, file filters, cores, report options) in `#settings-more` under page 2's table.
-  **Every ticked dataset needs its From/To** (`optionErrors`, `is-required` red); OceanVal fills the boxes not typed in
+  **Every ticked dataset needs its From/To** (`optionErrors`, `is-required` red; `outsideOutput` compares any years with the output's: partly outside is an amber warning on the dataset and in the years groups, none in the output is an error that blocks Continue); OceanVal fills the boxes not typed in
   (`dataset.typed`, `fill`/`filledValue`, red and bold `is-oceanval`): point datasets from **What years do you want to
   validate?** (`point_start`/`point_end`, required when a point dataset is ticked) and **Match point observations by**
   (no "Global setting" option; written only when typed, `sentOptions`), climatologies from **What simulation years do you
   want to use for climatologies?** (`clim_start`/`clim_end` → `settings["clim_years"]`), else the years create_recipes was
-  given (standalone) or the demo's (`app.initial_years`). Matchup's `start`/`end` are worked out by the page
+  given (standalone; the app, demo included, fills none). Matchup's `start`/`end` are worked out by the page
   (`matchupYears`: the span of the ticked datasets' years). WOA23 temperature/salinity (`decadal`) need years inside one
   `_WOA23_PERIODS` decade: filled years that fit none are an error on the dataset (the `#woa-dialog` is gone; the server
   still takes `woa23_start`/`woa23_end` → `settings["woa_years"]`). Each built-in gridded source has an **i**
@@ -210,25 +226,34 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   the setup answer starts `App._read_own_simulation`, a thread (`netcdf_lock.LOCK`, `create_recipes._variable_long_names`, keyed by
   `_simulation(arguments)`, dropped by `_own_sim_number`/`_reset_count`) whose answer is `state.own.simulation`
   (`status` reading/done/failed, `read`, and `available`/`long_names` only while an own data view is shown). **Simulation variable** (both
-  kinds) gets `OceanValGUI.variablesPicker(multi)` in `#o-<kind>-model_variable-pick`; `add_own_data`/`own_future` refuse a name not in
+  kinds) is an `OceanValGUI.variableBox(multi)` (`listIn`; the note under it in `#o-<kind>-model_variable-pick`); `add_own_data`/`own_future` refuse a name not in
   `available` (`_unknown_simulation_variable`), but only once status is `done`, so a slow or failed read never blocks. `own_data.check_entry`
-  itself knows nothing of the simulation. **Observation variable** (gridded) gets a single-select picker over `POST /api/own_inspect`
+  itself knows nothing of the simulation. **Observation variable** (gridded) is a single `variableBox` over `POST /api/own_inspect`
   (`App.own_inspect` → `recipe_checks.inspect_gridded("disk")`: a file, a directory or an `.nc` pattern, the first file's variables), asked
   500 ms after `obs_path` stops changing (token-guarded `lookAtObservations`); never for a URL or the THREDDS tick, and its errors are notes,
-  not refusals. A new box that offers the simulation's or observations' variables goes through these slots (`setPick`/`setBox`).
-  **Every search of variables (the pop-out picker, the viewer's `#vw-search`, Analyze's Add multiple variables) goes through
+  not refusals. A new box that offers the simulation's or observations' variables goes through `listIn`/`setPick`.
+  **Every search of variables (the variable boxes, the viewer's `#vw-search`, Analyze's Add multiple variables) goes through
   `OceanValGUI.searchMatcher`**: words are all required; a plain word is a substring of the fields joined, a word with `*`/`?` is
   a wildcard matched within one field (never from a name into its long_name), unanchored, all else literal. A new search must use it.
+- **A variable is asked for in one box, `OceanValGUI.variableBox(input, {available, longNames, multi, extra})`** (`data/gui.js`; the user's
+  rule, 2026-10-30: no "Select from the model's variables" link any more): the box opens the old pop-out (`.vars__popover`, fixed, placed
+  under the box: a tick, Variable, long_name, Selected at the top, the counts) on focus, and **the box is its search**: the rows shown match the
+  part being typed (`searchMatcher`; with `multi`, the part between the `+`s the caret is in). Names in the box are ticked, so `P1_Chl+` typed
+  ticks P1_Chl and shows every row; `+` is just typed (never completed). A click on a row ticks it and adds it (replacing a half-typed search,
+  else `+name` at the end; single: the value, and the pop-out closes); on a ticked row or its × it is taken out; every row is shown after a
+  click. The pop-out's `mousedown` is prevented so the focus stays in the box; blur and Escape close it. Every change is an `input` event, so
+  the caller's input handler takes it. A scroll elsewhere on the page never closes it; an ancestor's scroll moves it with the box. Used by
+  the Analyze/Compare variable rows, the Analyze and recipes thickness (single, z_level first), the own data steps and the recipes window's
+  rows; a new variable box must use it.
 - The own data step can save an entry as a recipe too ("Add this data for use now and in
   future"): view `own_future` (`App.own_future`/`own_future_save`), built from the entry by
   `recipe_forms.from_own_data`/`missing_boxes`/`with_boxes`, assumptions shown in amber.
   `create_recipes.replaced_recipes` leaves a user recipe with the same variable and source as
   an own data entry out of that run's recipes window, so it is not registered twice.
-- The window's settings (`oceanval/user_settings.py`: colour theme, whether the demo is offered)
+- The window's settings (`oceanval/user_settings.py`: whether the demo is offered, the data store)
   live under `"settings"` in the *global* rc only, beside `"recipes"`; `load()` never raises.
-  `recipes_gui.render_page` puts `data-theme` on each page's `<html>`; the themes are token
-  overrides in `data/gui.css` (`[data-theme="dark"]` etc.), so colours in the pages must be
-  tokens, never hex, and the default theme must stay pixel-identical.
+  There are no colour themes (removed on request, as a burden to maintain); a `"theme"` left in an rc is ignored.
+  Colours in the pages are tokens (`:root` in `data/gui.css`), never hex.
 
 ### What OceanVal remembers (`.oceanvalcache`)
 
@@ -269,6 +294,24 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   COBE2's THREDDS server rate limits (HTTP 429): `data_store.download_instead` swaps in the
   plain file download (`DOWNLOADS`) when it turns requests away or fails, with or without a store.
 
+### `cdo sinfo` on every model file (`oceanval/cdo_check.py`)
+
+- `cdo sinfo file.nc` must never segfault; a file it crashes on means OceanVal **cannot work with the data** (everything reads model files
+  with CDO) and that the data may not be CF-compliant. Once the files are identified, `cdo_check.Check` (a thread plus up to 4 workers, a
+  killable process group per file, 300 s a file) runs it on **all** of them and keeps `results` per path (`ok`/`segfault`/`error`/`unknown`;
+  a missing `cdo`, a timeout or a CDO error that is not a crash is never a fault). `cdo_check.message` is the one wording: how many files, the
+  CF-compliance warning and https://anaconda.org/conda-forge/cdo (try another CDO version).
+- **Not a warning: it blocks.** Python API: `cdo_check.start(paths)` where `matchup()` has its files (`_files_found`), `analysis.locate_rows` (so
+  `analyze()` and `compare_simulations()`), then `cdo_check.require(check)` raises `ValueError` before any work (matchup: after the time_shift
+  question; locate_rows: before its other problems). `start` returns None when `news_marker()` is set (the window checked already), when the
+  files are none, or when `cdo_check.ENABLED` is False (the tests' autouse `no_cdo_check` fixture; mark a test `cdo_check` and use `fake_cdo`
+  to turn it on).
+- Window: `App._start_cdo_check(simulations)` (Validate/Match up `setup`, Analyze `_analyze_setup`, Compare `simcompare_sims`, Viewer `_viewer_setup`;
+  a no-op for the same files), `_cdo_fault` on the first segfault (and again when all are looked at): stops a run going, cancels the recipes
+  window (whose heartbeat answers `blocked`, so `gui.js` goes to the main page), and `start_run` refuses while `_cdo_failed` is set.
+  `state()["cdo_check"]` shows the pop-out `#cdo-failed` (`renderCdoFailed`): modal, above every other pop-out, **no Escape, backdrop or
+  Back; Start again (`/api/restart_all`) is the only way on** (`reset` and `quit` drop the check).
+
 ### Analyze (`oceanval/analysis.py`)
 
 - `analyze()` works on model output alone: per variable (name → model variable, `+` sums),
@@ -277,7 +320,8 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   `vertical_integration` with the thickness, at its first time, or `fixed=True` for
   `"z_level"`; maps of the annual mean and of each month, but no domain-mean monthly line, which
   the seasonal cycles' mean seasonal cycle already gives) and/or phenology (peak day of the surface daily climatology, daily output
-  only). Each month of each year is averaged first. Everything goes in
+  only; opening the tile when no variable has daily output shows the `#no-daily` pop-out, `openNoDaily`, with a Close button back to the options
+  page, instead of the phenology pop-out). Each month of each year is averaged first. Everything goes in
   `<out_dir>/oceanval_analysis/` (`results/` netCDF + `analysis.json`, `report/` book,
   `report.html` link), which it replaces whole.
 - The peak day is worked out in `analysis.peak` from the climatology sorted by month/day,
@@ -399,6 +443,14 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   FVCOM's first sigma layer. `compare_simulations` still refuses FVCOM (`locate_rows(refuse_fvcom=)`). Tests: `tests/test_fvcom_analysis.py`
   (`viewer_simulations.fvcom_months`; values worked out by hand, uneven `siglev` and a changing `zeta`, the areas, regions, stations and a
   peak day per node and transects of a field linear on the mesh included), the `fvcom` case of `test_analysis_plots.py` (every FVCOM figure).
+- **A model's extent is that of its cells with values, never of its whole coordinate arrays** (`oceanval/extent.py`: `valid_lonlat`
+  of a field's first time and top level, `first_slice`/`of_file` for a model file, read through CDO first). NEMO puts the cells of
+  the land processors it leaves out at lon -1, lat -1 (36 k of AMM7's 111 k cells), so a whole grid's min/max can be lat -1 to 65.
+  The unifier's crop box (`sim_unify.prepare`, `domain_mask.mask_gridded`; on a curvilinear grid CDO keeps the index box of the
+  cells inside, which for a global ORCA025 and the whole-grid box was all 1.74 M cells), `gridded._lonlat_bounds` (the obs crop and
+  the data store's download box), `matchall._model_box` (ICES), `analysis_plots._plot_grid`/`_panel_size`,
+  `analysis_series.estimate_grid`, Compare's "The simulations cover" and `viewer_plots.coastline_scale` use it. FVCOM's extents
+  (mesh nodes) are left as they are. A new extent of model output must use it.
 - **Every netCDF read in the window's own process holds `oceanval.netcdf_lock.LOCK`** (`analysis._FILE_READ_LOCK` is it):
   netCDF-C/HDF5 are not thread-safe and xarray gives each file a lock of its own, so two of the window's threads opening
   files at once (the grids and the missing-value probe did) crash it with a segmentation fault. A new read in a thread of
@@ -419,9 +471,9 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   enforces), the years of every analysis must lie inside the output's (`analysis_forms._years` in the window,
   `analyze()` against `row["times"]`: a start before its first year or an end after its last is refused), and `as_missing` is applied in `_model_data` and to the thickness, as matchup
   does. **Nothing is pre-selected in the window**: the forms start empty (rows, ticks, years,
-  thickness, `how`); the years of the output are only placeholders/hints. The one exception (the user's rule,
-  2026-10-25): each variable's own tick in the pop-outs (`use`, by its name; phenology only for daily output)
-  starts ticked, so a variable is left out by unticking it, and one ticked with no layer is an error on its row.
+  thickness, `how`); the years of the output are only placeholders/hints. That includes each variable's own tick in
+  the pop-outs (`use`, by its name), which starts unticked (the user's rule, 2026-10-31, reversing one of 2026-10-25), so
+  the user ticks the variables to analyse; ticking a layer ticks it, and one ticked with no layer is an error on its row.
   With 2+ variables each pop-out's table starts with an **All variables** row (`allVariablesRow`, its own
   `<tbody class="analyze-all">` `#clim-all`/`#phen-all`/`#chg-all`, kept in `analyzeDialog.all`, never sent):
   a box set there is set in every row it applies to (`fanOut`, skipping disabled boxes, by dispatching the
@@ -493,9 +545,9 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   `analysis.py` and runs it as `app_child analyze <path>`, with `times_index=` the files' times the check read (`_analyze_keep_times`, a temporary copy; not in a saved script), so `analyze()` does not read them again. **Save Python script to run later** (`#ao-save`, beside Run, enabled as it is; `/api/analyze_save_script` → `analyze_run(save=True)`) writes
   the same script, runs nothing, and shows view `script_saved` (`_script_saved`, shared with Compare simulations, whose saved script has no `times_index`,
   those files being temporary; the page's words by `savedScriptWords`).
-  The variables page's buttons (`#av-add-all`, `#av-remove-all`, `#av-add-3d`, `#av-add-2d`) all work in the page from `state.analyze.picker`:
-  `addVariables(kind)` adds the variables no row holds yet, 3D being `picker.levels > 1` (nctoolkit's `nlevels`, the rule Analyze's Vertical
-  analyses use) and 2D the rest; Remove all leaves one blank row. Tests read the picker with `picker_of(app)`: the page's own `state` is inside a
+  The variables page's buttons (each row's right-hand cell is one rounded box, `.analyze-pill` (`variablePill`, shared with Compare's `scVariableRow`), holding a **+** on the left, which adds a blank row directly below that row, and a **×** that removes it (the user's rule, 2026-10-31: there is no + under the table any more; any row can be removed, and removing the last leaves a blank row whose × is disabled, light grey, as does a lone blank row; `refresh*Variables` sets it); Add multiple variables, `#av-remove-all`) work in the page from `state.analyze.picker`:
+  Add multiple variables (`addVariableRows`) adds the variables no row holds yet, tagging each 3D (`picker.levels > 1`, nctoolkit's `nlevels`, the rule
+  Analyze's Vertical analyses use) or 2D; Remove all leaves one blank row. Tests read the picker with `picker_of(app)`: the page's own `state` is inside a
   closure, so `page.evaluate("() => state")` finds the `<script id="state">` element.
 
 - **Info pop-outs** (`oceanval/analysis_examples.py`): an **i** (`infoButton`/`withInfo` in `oceanval_app.html`, `.info-btn`, beside the label, never inside it) next to
@@ -511,7 +563,7 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
 - `compare_simulations(simulations, variables, ...)` does everything `analyze()` does for 2–5 simulations
   and builds one report, simulations side by side. `variables={name: {simulation: model variable}}`; every other
   analysis argument is `analyze()`'s, **the same for every simulation, with one set of years that every simulation
-  has** (each simulation is checked by `analysis.locate_rows`, which `analyze()` uses too). Units must agree. It is
+  has** (each simulation is checked by `analysis.locate_rows`, which `analyze()` uses too). It is
   not the validate-side `compare()` (`oceanval_comparison`, the window's "Compare existing validations"): every name of
   this feature is `simcompare`/`sim_compare`/`sc-`, its folder is `oceanval_simulation_comparison` (in
   `data_store.CLEARED_FOLDERS`).
@@ -519,23 +571,65 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   CSV schemas, and an `analysis.json` of its own, so `analysis_plots` can still draw one simulation at a time
   (`monthly_maps(limits=)` and `change_maps(also=)` take the scale all the simulations share). `comparison.json` says
   what is where, and each simulation's colour (`sim_compare.COLOURS`, Okabe-Ito, in the order of the simulations).
+  **With nothing unified, masked or converted, a simulation's results are exactly `analyze()`'s of it alone**: the
+  session fixtures `compared_monthly`/`compared_daily` and `analysed_*` in `tests/conftest.py` are run once a session,
+  checked as analyze tests in `tests/test_analysis.py` (`TestTheSimulationsOfAComparison`), and `tests/test_sim_compare.py`
+  compares one simulation of its comparisons with them (`conftest.same_as_analyze`: the same files, each identical).
 - Combined figures are `oceanval/sim_plots.py`, with the same contract as Analyze's: each is drawn by its own script
   (colours and files as literals), `tests/test_sim_plots.py` redraws each in a fresh process and compares pixels. Maps are
   a panel for each simulation on **one colour scale**; series are lines coloured by simulation, **a panel for each
   series** (domain, each region, each station); transects are lines coloured by simulation, or a panel each. The report
   is Analyze's `InterimBook` with its own `analysis.Templates` (`sim_report.templates()`, `simcompare_*.ipynb`,
   `chunk_sim*.pytemplate`: chunk names are letters only).
-- **Grid unification** (`oceanval/sim_unify.py`): `unify={"lon","lat","res"}` (nctoolkit `to_latlon`) or `{"baseline": name}`
-  (`regrid`, the baseline itself untouched; a simulation already on the baseline's grid is not regridded, as bilinear
+- **Grid unification** (`oceanval/sim_unify.py`): `unify={"lon","lat","res"}` (nctoolkit `to_latlon`) or `{"baseline": name}`,
+  either with an optional `"regrid"` (`sim_unify.METHODS`: bil, nn, dis, con; kept in the dict only when given, bilinear if not;
+  `sim_unify.METHODS` is the one list, `grid_align` uses it) (`regrid`, the baseline itself untouched;
+  **every grid is cropped before it is regridded** to the target's extent a degree wider each way, `PAD`: `sim_unify.padded_box`, None for
+  a target round the globe or across the dateline, and `crop_to`, which leaves the dataset as it was if CDO cannot crop it, so cropping only
+  ever saves time; the baseline's box is kept by `prepare` in `box_path` JSON; `domain_mask.mask_gridded` crops to the mask's extent too, but
+  never FVCOM output, `fvcom=`; a simulation already on the baseline's grid is not regridded, as bilinear
   remapping spreads missing cells). It is applied through `row["unify"]` in `analysis.monthly_means_of`,
   `daily_climatology_of` and the transects' thickness: **after the vertical reduction** (surface/bottom/column mean) of each
   layer, so all analyses see the same cells. A cell missing in any simulation is missing in all: the mask is made in
-  `make_common_grid` (before any analysis) from the **first time step** of each simulation's field of that layer, on the common grid,
+  `make_common_grid` (before any analysis) from the **second time step** of each simulation's field of that layer (`analysis.second_step_of`: the
+  first file's second, else the second file's first, else the first; the user's rule, 2026-10-30, as the first step of their output was empty
+  and made every cell missing; the grids step's maps and preview use the same rule through `_sc_field_step`; `prepare` raises if no cell is
+  shared), on the common grid,
   **in xarray, written with an explicit `_FillValue`** — CDO arithmetic on NaN-fill-valued files does not propagate missing,
   so `x*0` / `ds_mask > 0` tricks (as the validate-side `compare()` notebooks use) wrongly give 0 where a value is missing and
   turn a real 0 into missing. Vertical transects need the same number of levels in every simulation.
-- The window: the landing page's third tile, views `simcompare_sims` / `_variables` / `_files` / `_grids` (mixin
-  `oceanval/sim_compare_app.py`, boxes in `sim_compare_forms.py`, JS block "Compare simulations" in `oceanval_app.html`), then
+- **Domain mask** (`compare_simulations(domain_mask=path)`, the same file and `oceanval/domain_mask.py` as validate's, used unchanged): checked
+  by `domain_mask.check` before any work, kept by `keep` as `results/domain_mask.nc` (`comparison.json`'s `domain_mask`, `domain_mask_text`) and put
+  in every row as `row["domain_mask"]` (`{"path", "method": "nn", "variable"}`). It is applied by `domain_mask.mask_gridded` **right after
+  `sim_unify.apply`** in `analysis.monthly_means_of`/`daily_climatology_of` and the transects' thickness (`_depths_along`), so every analysis sees
+  the same masked cells and every simulation ends on the mask's grid (`same_grid` True; with a mask and no unify the report's Model grids says
+  only the mask's sentence). `analysis_transects.unified_steps` takes the points of a line from the mask's grid. A row without it is `analyze()`'s,
+  unchanged. In the window it is asked on the **grids step**, under the unify question, with validate's wording and map
+  (`domainMaskQuestion("scg", ...)`, `POST /api/domain_mask`, which `App.domain_mask_map` serves on `simcompare_grids` too): its boxes
+  (`domain_mask`, `domain_mask_path`) are in `unify_form` (so Back keeps them) but the page keeps its own `scMaskForm`; `simcompare_grids` checks them
+  with `app.check_domain_mask` into `sc_domain_mask`, which `sim_compare_forms.arguments(domain_mask=)` writes into the script.
+- **Units: the first simulation's are the comparison's.** A variable another simulation gives in other units is converted into them by
+  `compare_simulations(unit_conversions={variable: {simulation: {"multiplier", "adder"}}})` (value × multiplier + adder, as validate's
+  `obs_multiplier`/`obs_adder`; `sim_compare.check_unit_conversions`: never the first simulation, multiplier > 0, and an explicit 1/0 says units
+  written otherwise are the same); without one, different units are refused. After `locate_rows`, a converted row gets `row["convert"]`,
+  `row["units_given"]` and the first simulation's `row["units"]`, so `_labelled`, `integral_units` and the report say the first's. **The conversion
+  is applied in one place, the end of `analysis._model_data`** (`-mulc`/`-addc`, after the rename/sum, after `as_missing`, which stays in the
+  simulation's own units), so every analysis, the unify masks and a water column's integral are of converted values; a new read of model
+  values for an analysis must go through `_model_data` too. `comparison.json` keeps `unit_conversions` and each variable's `conversions`
+  (`describe_conversion`'s text), which the variable's page and the Methods (`sim_report.conversions_text`, `methods`) say. In the window, view
+  **`simcompare_units`** comes after the variables step only when `sim_compare_forms.unit_rows` finds units written otherwise than the first
+  simulation's (one side missing counts): validate's units table (`unitsRow` with a spec, `SC_UNITS`; `unit_conversion.suggest(name, this
+  simulation's units, the first's)` fills it, red and bold), **a page for each simulation that needs one** (client-side, `scUnits.page`), the
+  tick to confirm on each; `POST /api/simcompare_units` (`check_unit_boxes`; every row shown is sent, blank as 1/0) → `sc_conversions` →
+  `arguments(unit_conversions=)`. Back keeps the boxes (`sc_unit_boxes`, by `unit_row_signature`).
+- The window: the landing page's third tile, views `simcompare_sims` / `_variables` / (`_units`) / `_files` / `_grids` (mixin
+  `oceanval/sim_compare_app.py`, boxes in `sim_compare_forms.py`, JS block "Compare simulations" in `oceanval_app.html`). **The grids step
+  has maps** (one `.ag-card` for each simulation, its first variable at the surface and **the simulation's second time step** if it has one, the
+  first file's second or else the second file's first, `_sc_field_step`, which Generate unified grid uses too, `POST /api/simcompare_panel`;
+  the unified grid card; the missing value `missing_probe` finds is used for the map): Yes shows them, then the method radios (box/baseline), the
+  **Regridding method** select (`unify_form["regrid"]`, blank = bilinear) and **Generate unified grid** (`POST /api/simcompare_generate`,
+  `grid_align.unified(box=)` or baseline), **an optional preview only**: Continue never waits for it, and the run still works the masks out per
+  variable and layer. The maps are drawn by `drawMap(id, item)`/`emptyMap(id, text, busy)` (busy: a spinner beside the text, while the unified grid is generated, which says what is being done: **Cropping / Regridding <simulation>…, Unifying the simulations…**, from `sim_unify.prepare(progress=)` through `grid_align.unified(progress=)` to `App.sc_stage` in the states, which `showGenerateStage` writes into the placeholder's text in place); there is no plus (the simulations are given). Then
   **Analyze's own options step** (`analyze_options`, `state.analyze`) with the variables as they are in all the simulations:
   `analyze_placed` is `sim_compare_forms.combined` (the fewest levels), the dates check is `_sc_check_rows` (the years every
   simulation has, the coarsest time resolution), the thickness name must be in every simulation's output (or a file, or
@@ -553,16 +647,16 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   `viewer_app.VIEWER`); the landing page is **two by two** (`.choices.is-four`, one column at ≤640px). Mixin
   `viewer_app.ViewerSteps` of `App` (views `setup` → `viewer_scanning` → `viewer`). **Page 1 is the shared setup view**
   (`action == "viewer"`: `simulationOnly()` in the page hides the domain/years as for Analyze), so the directories-down
-  logic, `depthBox`, "Finding files", the recent-directories arrow and the amber `restart` Skip box are OceanVal's own; only
-  the multi-row **Missing values** fieldset (`#setup-missing`, `missingRows`, sent as JSON `missing` by `setupForm()`,
-  `viewer_app.parse_missing`) is the viewer's. **Its rows start filled in from the files** (`viewer_missing.guess` via
+  logic, `depthBox`, "Finding files", the recent-directories arrow and the `restart` Skip box are OceanVal's own; only
+  the **Missing values** fieldset (`#setup-missing`, `missingRows`; **one From and one optional To only, the user's rule, 2026-10-30: no + or ×, and `fillMissingRows`/`setupForm` keep only the first row**; sent as JSON `missing` by `setupForm()`,
+  `viewer_app.parse_missing`, which still takes a list of ranges) is the viewer's. **Its row starts filled in from the files** (`viewer_missing.guess` via
   `/api/viewer/missing`, asked by `askMissingGuess` after each `/api/probe` answer with files; `scan(wait=False)`, then
   `missing_probe.probe` on the first mappable variable of the first file type, else 0 for `is_likely_nemo_ersem` names): amber
-  `is-found` / `is-ersem` with Analyze's wording, "Attempting to identify missing value range" and a spinner while it runs. Typing in or
-  removing a row (`missingEdited`) makes the rows the user's for good; rows OceanVal filled are emptied when the simulation or
+  `is-found` / `is-ersem` with Analyze's wording, "Attempting to identify missing value range" and a spinner while it runs. Typing in
+  the boxes (`missingEdited`) makes them the user's for good; a value OceanVal filled is emptied when the simulation or
   filters change. A simulation viewed is recorded in `.oceanvalcache` (`record_sim_dir`).
   **Editing the simulation directory searches afresh** (`newSimulationForViewer`): the directories down are blanked for the folders' layout to
-  fill again, and the missing-value rows (even typed ones) are emptied and looked for again. Viewer only: Validate/Analyze keep a typed depth.
+  fill again, and the missing-value boxes (even typed ones) are emptied and looked for again. Viewer only: Validate/Analyze keep a typed depth.
   **The simulation box also takes the path of one file** (`viewer_catalogue.viewer_paths`, the viewer's `check_setup`, `probe()["file"]`): used as it is, whatever its name, not filtered by exclude/require, with no directories down (the box is disabled; the label says "directory or file path"). Browse… stays a folder picker.
 - `viewer_catalogue.scan(wait=False)` reads the variables of each file type's first file; `Catalogue.read_times` then reads
   every file's times **in a process of its own**: `viewer_times.py` is run as a script by path (`python -I`), imports nothing
@@ -602,10 +696,10 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   (which reads the same function for the reports it opens) obeys it. When none is opened the link and `remote_hint` (`ssh -L`) are printed.
 - **Files are never left out unasked.** No code drops a file for having "restart" in its name: `create_recipes.simulation_paths`
   (Analyze, Compare, the window's live check and the output years), `_has_nc`, `model_check` and `matchall` leave that to `exclude`/`require`.
-  The window starts the **Skip file names containing** box with `create_recipes.DEFAULT_EXCLUDE` (`"restart"`; Validate, Analyze and each
-  Compare row: `default_setup_form`, `sim_compare_forms.blank_sim`, sent as `state.default_exclude`) in amber (`is-detected`, `isDefaultExclude`
-  in the page) with a line saying so, until it is changed. A Compare row holding only that is unused (`sim_compare_forms.row_is_blank`,
-  `scRowEmpty`). The Python defaults (`matchup(exclude=[])`, `analyze(exclude=None)`) are unchanged.
+  **The window's Skip file names containing boxes start empty** (Validate, Analyze and each Compare row: `default_setup_form`,
+  `sim_compare_forms.blank_sim`; the user's rule, 2026-10-30, reversing an earlier start with `restart`): what is skipped is left to the user,
+  and `"restart"` must never be added to an `exclude` by default, in the window or the Python API (`matchup(exclude=[])`, `analyze(exclude=None)`;
+  `tests/test_app.py::test_the_files_skipped_start_empty` checks). A Compare row is unused when all its boxes are empty (`sim_compare_forms.row_is_blank`, `scRowEmpty`).
 - **The live file check shows "Finding files"** (a spinner, `.is-finding`) from the edit of the directory, depth or filter boxes until the
   `/api/probe` answer is in: `probePending` in `askProbe` (the badge `#ndown-found`, Validate/Matchup/Analyze) and `scSims.pending[n]` in
   `scAskProbe` (`#sc-m-n`). The check's number is taken at the edit, so an earlier answer still on its way is dropped, and the last count is not
@@ -618,6 +712,14 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   (without it, closing the browser left the command running for 30 min); with every page gone it quits only when not `_busy()`
   (status `starting`/`running`, which `_run_finished` keeps through a matchup's hand-over to its report run), otherwise it
   prints the window's link to the terminal once and quits when the run is over. `poll()` skips its 150 ms wait while hidden.
+- **Masking part of the domain** (`oceanval/domain_mask.py`): `matchup(domain_mask=path)` (in `MATCHUP_SETTINGS`), a netCDF file of
+  one variable at one time step (and level), 1 in the cells wanted, 0 or missing elsewhere (`inspect` refuses anything else, before any
+  work). Once the matchups are confirmed `keep` writes it cleaned (1 and missing, explicit `_FillValue`) as
+  `oceanval_matchups/domain_mask.nc` → `session_info["domain_mask"] = {"path", "method": "nn"}`, applied by
+  `domain_mask.mask_gridded` (`ds * mask`, after regridding to the mask with crop to its cells, skipped if already on its grid) so the
+  matchups end on the file's grid, and `domain_mask.mask_points` (nearest neighbour always, `REMAP_EXTRAPOLATE=off` so a point beyond the mask's grid is dropped, then merged on lon/lat rounded to 5 decimals). In the window it is asked with the other matchup boxes (`#v-group-domain-mask`, `#row-f-domain-mask`; boxes `domain_mask` "yes"/"no", **No to start**, and `domain_mask_path`),
+  checked and drawn as it is typed (`domainMaskQuestion` in the page, `POST /api/domain_mask` → `App.domain_mask_map`), and
+  `check_domain_mask` puts the user's own file into `matchup` (so into `_run_output` and the script; None for No).
 - create_recipes runs in a thread of the app; `recipes_gui.hosted_by(app)` makes its window
   one of the app's pages (`/recipes/`) instead of a server of its own. Matchup/validate run in a
   separate process (`oceanval/app_child.py`) whose stdout is the console.
@@ -685,7 +787,7 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   `answered_by`) — never call `input()`/`isatty()` directly, or the window can't answer it. In
   the child process a question is a `QUESTION_MARKER` line on stdout, answered on stdin.
 - **Restart** (the circular arrow beside the **i**, `mountChrome(restart=)` in `data/gui.js`, in the recipes window too) asks in a pop-up
-  (`#restart-confirm`, Cancel is the default, and it says a run in progress will be stopped), then posts `/api/restart_all` →
+  (`#restart-confirm`: only the sentence "Begin again with a clean slate" and the Cancel and Restart buttons, Cancel the default), then posts `/api/restart_all` →
   `App.reset`, which goes to `home` from **any** view with everything entered forgotten (forms, own data, recipes/units state, the run,
   the draft script folder, Analyze/Compare state); the page then reloads, so its own objects are fresh. Kept: `settings`, `leftovers`,
   `.oceanvalrc` recipes, `.oceanvalcache`, `version`. A run is stopped, and threads of the steps still going (`_prepare`,
@@ -696,9 +798,21 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
 - The window's Info panel (the **i** beside Settings) shows the version as `oceanval.__version__`, which is the
   installed package's metadata and so comes from `setup.py`'s `version=`. Never type the number in the page or app.py.
   Its dataset table (`app.BUILTIN_DATASETS`) is built from the built-in catalogues, not the user's recipes.
+  It ends with a credit (`.info__credit`): the PML logo and "Developed by the Environmental Intelligence group at Plymouth Marine Laboratory" (as the website's footer), then "Released under the GNU GPLv3 license." and a GPLv3 badge. The logo is a `data:` URI that `recipes_gui.render_page` puts in for `__OCEANVAL_PML_LOGO__` in `gui.js`.
+- **The browser never offers what was typed before** (the user's rule, 2026-10-30): every typed box has `autocomplete="off"`,
+  in the markup and, for boxes the pages make later, by the guard at the end of `data/gui.js` (`forget`, a `MutationObserver`
+  and `focusin`). Never `chrome-off`, which Chrome ignores. Only the simulation directories are remembered, by OceanVal
+  itself (`.oceanvalcache`). `tests/test_no_browser_memory.py` checks both windows.
+- **Required tags show only while empty** (the user's rule, 2026-10-31): a red tag (`.own-req`, `.year-required`) is there at the start and goes
+  once its box is filled, and returns if it is emptied. `OceanValGUI.syncRequired` (`gui.js`; on input/change/click, DOM mutations and a 300 ms
+  interval, as a script's `.value =` fires no event) only toggles `is-satisfied` on the tag (and its `.own-field`) and `is-filled` on
+  the boxes of the Analyze pop-outs and own-data fields, whose red borders it removes; the page's own `hidden`/`is-required` are untouched.
+  The box is found from the tag (`data-required-for` ids, the label's `for`, the one box in its label/row/field, a legend's fieldset); a tag
+  in a table head covers the columns it spans (`data-required-tick`: each ticked row has a layer; `data-required-any`: some row is ticked;
+  otherwise every ticked row has the boxes filled). A new Required tag needs no code if it sits in the label/row/legend of its box.
 - **A choice among boxes must be unmistakable**: the chosen one is filled with the accent colour (or tinted, with a thick
-  accent border), bold and a little bigger. Radio rows (`.ptr-mode`, `.demo-detail__option`, `.prefs__use`, `.reg-where label`) and
-  the theme cards are styled together at the end of `data/gui.css`; `.segmented` (the domain picker), `.choice.is-chosen` and the
+  accent border), bold and a little bigger. Radio rows (`.ptr-mode`, `.demo-detail__option`, `.prefs__use`, `.reg-where label`) are
+  styled together at the end of `data/gui.css`; `.segmented` (the domain picker), `.choice.is-chosen` and the
   existing matchups' ticks are in `oceanval_app.html`. A new pick-one control must use or extend these, with tokens only.
 - **The "directories down" boxes** (`#f-ndown`, shared by Matchup, Validate and Analyze, and `#sc-ndown_1`..`5` of Compare
   simulations) are `depthBox`es: `withChoices` boxes whose arrow lists 0 to 5 ("0 in the directory itself", "1 directory
@@ -706,14 +820,17 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   A list wider than its box is moved in from the window's edge, and a blank box has none of its list chosen.
   **A blank box is filled from the folders' layout** (`create_recipes.folder_layout`, in `/api/probe`'s `layout`: `{pattern, ndown}`
   whatever depth is typed): a year directory with all of `01`..`12` and `.nc` files (`YYYY/MM/**.nc`, 2), the twelve months in the
-  directory (`MM/*.nc`, 1), or no subdirectories and `.nc` files (`*.nc`, 0). It is only a few `scandir`s (NFS). The fill is amber
-  (`is-detected`, tokens), with the line "Folder structure was identified as <pattern>" (`autoNdown` for setup, `scSims.auto[n]` for
-  Compare); typing or picking sets the flag off and the value is the user's for good, and a directory without a layout empties a
-  value OceanVal filled. The probe is asked again once it fills, to count the files.
+  directory (`MM/*.nc`, 1), or no subdirectories and `.nc` files (`*.nc`, 0). It is only a few `scandir`s (NFS). The fill is bold
+  (`is-detected` on a `.is-depth` box: ordinary colours, never amber, the user's rule, 2026-10-31) and is told once in a modal pop-out,
+  `#folder-structure` (`tellFolderStructure`, "It looks like the folder structure is <pattern> and the number of directories down is assumed to
+  be <n>. Change it if this is not correct." and Continue; Compare names the simulation), keyed by directory + layout, one at a time and not over
+  another pop-out (`autoNdown` for setup, `scSims.auto[n]` for Compare); typing or picking sets the flag off and the value is the user's for good
+  (`forgetFolderStructure`), and a directory without a layout empties a value OceanVal filled. The tests' `browser` fixture dismisses the pop-out
+  on every page (`DISMISS_FOLDER_STRUCTURE`) unless the test sets `window.__keepFolderStructure`. The probe is asked again once it fills, to count the files.
 - Both windows inline `data/gui.css` and `data/gui.js` (shared look and helpers, including
-  `OceanValGUI.variablesPicker`, the pop-out of the model's variables) via
+  `OceanValGUI.variableBox`, the box that opens the pop-out of the model's variables) via
   `recipes_gui.render_page`. The browser tests (`browser` fixture in `tests/conftest.py`) skip
-  where playwright/Chromium is missing, as in CI.
+  where playwright/Chromium is missing, as in CI (`pip install playwright && python -m playwright install chromium` runs them).
 
 ### Network dependency for gridded recipes
 

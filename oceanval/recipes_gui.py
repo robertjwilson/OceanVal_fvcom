@@ -12,6 +12,7 @@ Run from the oceanval command (see oceanval.app), the window is one of its
 pages instead (see hosted_by).
 """
 
+import base64
 import contextlib
 import copy
 import getpass
@@ -189,12 +190,18 @@ def check_settings(form, available, fvcom=False):
     settings = default_settings(None, None)
     errors = {}
 
+    # with nothing ticked the window has no years to give: matchup's are then
+    # left for the script to say
+    no_years = not text("start") and not text("end")
     for name in ("start", "end"):
+        if no_years:
+            settings[name] = None
+            continue
         try:
             settings[name] = int(text(name))
         except ValueError:
             errors[name] = f"{'First' if name == 'start' else 'Last'} must be a year, e.g. 2011."
-    if not errors and settings["end"] < settings["start"]:
+    if not errors and not no_years and settings["end"] < settings["start"]:
         errors["end"] = "Last year must not be before the first year."
 
     # the years climatology datasets average the simulation over, if not the
@@ -712,6 +719,9 @@ def recipe_rows(mapping, domain, cwd=None, replaced=(), own_data=None):
         }
         for variable in sorted(variables)
     ]
+    for row in rows:
+        # the name in the Environmental variable column (the title stays the report's)
+        row["display"] = user_recipes.display_name(row["variable"], row["title"])
     return [row for row in rows if row["gridded"] or row["point"] or row["own"]]
 
 
@@ -735,14 +745,20 @@ def render_page(template, state):
         .replace(">", "\\u003e")
         .replace("&", "\\u0026")
     )
-    theme = user_settings.load()["theme"]
+    def picture(name, kind):
+        encoded = base64.b64encode(data.joinpath(name).read_bytes()).decode("ascii")
+        return f"data:{kind};base64,{encoded}"
+
     html = read(template)
-    if theme != user_settings.DEFAULTS["theme"]:
-        html = html.replace('<html lang="en">', f'<html lang="en" data-theme="{theme}">', 1)
     return (
         html
         .replace("/*__OCEANVAL_GUI_CSS__*/", read("gui.css"))
-        .replace("/*__OCEANVAL_GUI_JS__*/", read("gui.js"))
+        .replace(
+            "/*__OCEANVAL_GUI_JS__*/",
+            # the Info panel's logo, inlined as the page loads nothing from elsewhere
+            read("gui.js")
+            .replace("__OCEANVAL_PML_LOGO__", picture("pml_logo.jpg", "image/jpeg")),
+        )
         # last, so nothing inlined above can be mistaken for it
         .replace("__OCEANVAL_STATE__", state)
     )
@@ -998,7 +1014,6 @@ class RecipePage:
             "datasets": app.BUILTIN_DATASETS,
             "user_settings": {
                 "values": user_settings.load(),
-                "themes": [[key, label] for key, label in user_settings.THEMES.items()],
                 "path": user_settings.path(),
                 "data_store": data_store.panel(user_settings.load()),
             },
@@ -1034,7 +1049,10 @@ class RecipePage:
             )
             years = None
             if "start" not in setting_errors and "end" not in setting_errors:
-                years = (settings["start"], settings["end"])
+                years = (
+                    None if settings["start"] is None
+                    else (settings["start"], settings["end"])
+                )
 
             mapping, selection, errors = {}, set(), {}
             point_options, point_errors = {}, {}

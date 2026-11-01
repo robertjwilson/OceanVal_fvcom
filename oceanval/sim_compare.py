@@ -17,7 +17,8 @@ Each simulation is analysed by the code analyze() uses, into a folder of its own
     oceanval_simulation_comparison/report/         the report's book
 
 The simulations can be put on one grid (see oceanval.sim_unify), with a cell
-missing in any of them missing in all.
+missing in any of them missing in all, and masked to part of the domain by a
+netCDF file (see oceanval.domain_mask), which is then the grid they all end on.
 
 The oceanval window (see oceanval.sim_compare_app) writes a script calling
 compare_simulations() and runs it.
@@ -29,11 +30,11 @@ import os
 import warnings
 import webbrowser
 
-import nctoolkit as nc
+from oceanval.quiet_nc import nc
 import numpy as np
-import xarray as xr
 
-from oceanval import netcdf_lock, sim_unify
+from oceanval import domain_mask as domain_mask_mod
+from oceanval import extent, sim_unify
 from oceanval.analysis import (
     BOTTOM,
     KINDS,
@@ -49,6 +50,7 @@ from oceanval.analysis import (
     check_as_missing,
     first_step_of,
     locate_rows,
+    second_step_of,
     save_info,
     tell_analyses,
     tell_variable,
@@ -206,6 +208,84 @@ def check_variables(variables, names):
     return by_sim
 
 
+def check_unit_conversions(unit_conversions, variables, names):
+    """unit_conversions, as {variable name: {simulation name: (multiplier,
+    adder)}}, checked against the variables and the simulations. It is given as
+    {variable name: {simulation name: {"multiplier": m, "adder": a}}}, either
+    left out for 1 and 0, and turns that simulation's values of the variable into
+    the units of the first simulation's, as value x multiplier + adder. The first
+    simulation is the one the others are converted into, so it has none. A
+    conversion of 1 and 0 says that the units, though written otherwise, are the
+    first simulation's. Raises ValueError saying what is wrong."""
+    if unit_conversions is None:
+        return {}
+    if not isinstance(unit_conversions, dict):
+        raise ValueError(
+            "unit_conversions must be a dict of the variables to convert and, for each, the simulations whose values "
+            'are converted into the first simulation\'s units, e.g. {"Temperature": {"Warm": {"multiplier": 1, '
+            '"adder": -273.15}}}.'
+        )
+    checked = {}
+    problems = []
+    for variable, by_sim in unit_conversions.items():
+        if variable not in variables:
+            problems.append(f"unit_conversions has {variable!r}, which is not one of the variables ({_listing(variables)}).")
+            continue
+        if not isinstance(by_sim, dict):
+            problems.append(f"The unit_conversions of {variable!r} must be a dict by simulation name.")
+            continue
+        for name, conversion in by_sim.items():
+            if name not in names:
+                problems.append(
+                    f"The unit_conversions of {variable!r} have {name!r}, which is not one of the simulations ({_listing(names)})."
+                )
+                continue
+            if name == names[0]:
+                problems.append(
+                    f"The unit_conversions of {variable!r} have {name!r}, the first simulation, whose units the others "
+                    "are converted into: it cannot be converted itself."
+                )
+                continue
+            unknown = set(conversion) - {"multiplier", "adder"} if isinstance(conversion, dict) else None
+            if unknown is None or unknown:
+                problems.append(f"The unit conversion of {variable!r} in {name!r} must be a dict of a multiplier and an adder.")
+                continue
+            values = []
+            for key, default in (("multiplier", 1), ("adder", 0)):
+                value = conversion.get(key, default)
+                if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)) or not np.isfinite(value):
+                    problems.append(f"The {key} of {variable!r} in {name!r} must be a number.")
+                    break
+                values.append(float(value))
+            else:
+                if values[0] <= 0:
+                    problems.append(
+                        f"The multiplier of {variable!r} in {name!r} must be more than 0: a change of units never "
+                        "multiplies by 0 or a negative number."
+                    )
+                else:
+                    # 1 and 0 too: units written otherwise, e.g. degree_Celsius for degC, that are the same
+                    checked.setdefault(variable, {})[name] = tuple(values)
+    if problems:
+        raise ValueError("\n".join(problems))
+    return checked
+
+
+def describe_conversion(units, multiplier, adder, into):
+    """A conversion of units as the report says it."""
+    steps = []
+    if multiplier != 1:
+        steps.append(f"multiplied by {_number(multiplier)}")
+    if adder:
+        steps.append(f"{_number(abs(adder))} {'added' if adder > 0 else 'taken away'}")
+    how = " and ".join(steps) if steps else "the same units, written otherwise"
+    return f"from {units or 'no units'} into {into or 'no units'} ({how})"
+
+
+def _number(value):
+    return f"{value:g}" if value != int(value) or abs(value) >= 1e6 else str(int(value))
+
+
 def layers_of(row):
     """The layers monthly_means_of (or daily_climatology_of) will be asked for
     row's variable in, in order: SURFACE, BOTTOM, the water column's, and LEVELS."""
@@ -244,7 +324,10 @@ def make_common_grid(unify, folder, sims, rows_by_sim, thickness_for):
             for sim in sims:
                 own = rows_by_sim[sim["name"]][number]
                 ds_thickness = _thickness_of(sim["thickness"], thickness_for[sim["name"]], own) if layer in WATER_COLUMN else None
-                fields[sim["name"]] = first_step_of(own["files"], own, layer, own["levels"], ds_thickness)
+                # the second time step, in case the first is empty (see analysis.second_step)
+                fields[sim["name"]] = first_step_of(
+                    own["files"], own, layer, own["levels"], ds_thickness, at=second_step_of(own)
+                )
             cells[row["key"]][layer] = list(sim_unify.prepare(folder, unify, row["key"], layer, fields))
     return cells
 
@@ -255,20 +338,8 @@ def grid_of(path, name=None):
     so CDO first writes one level of one time step of variable name (of every
     variable, if None) to a small file, and only that is opened: select reads
     only what it chooses."""
-    chosen = f"name={name}," if name else ""
-    # a variable with no times has no first time step to choose
-    for choice in (f"-select,{chosen}levidx=1,timestep=1", f"-select,{chosen}levidx=1"):
-        try:
-            with warnings.catch_warnings(record=True):
-                ds = nc.open_data(path, checks=False)
-                ds.cdo_command(choice)
-                ds.run()
-            # the window looks at the grids in a thread of its own
-            with netcdf_lock.LOCK, xr.open_dataset(ds.current[0], decode_times=False) as data:
-                return sim_unify._lonlat(data)
-        except Exception:
-            continue
-    return None
+    data = extent.first_slice(path, name)
+    return None if data is None else extent.lonlat(data)
 
 
 def first_parts(rows_by_sim, sims):
@@ -300,6 +371,17 @@ def _same_grid(rows_by_sim, sims):
         return None
 
 
+def describe_mask(kept):
+    """What the domain mask does, as a sentence for the report, or None for no mask."""
+    if kept is None:
+        return None
+    return (
+        "The domain was masked with a netCDF file: each simulation was regridded to the file's grid by nearest "
+        "neighbour, and only the cells with a value of 1 in the file were kept, so all the simulations were "
+        "compared over those cells, on the file's grid."
+    )
+
+
 @_restores_nctoolkit_options
 def compare_simulations(
     simulations=None,
@@ -315,6 +397,8 @@ def compare_simulations(
     lon_lim=None,
     lat_lim=None,
     unify=None,
+    domain_mask=None,
+    unit_conversions=None,
     thickness=None,
     time_shift=None,
     as_missing=None,
@@ -345,7 +429,8 @@ def compare_simulations(
         variable holding it in each simulation, several summed as "a+b", e.g.
         {"Temperature": {"Base": "thetao", "Warm": "votemper"}}. A model variable
         alone is for a variable with the same one in every simulation. The
-        simulations must give the variable in the same units.
+        simulations must give the variable in the same units as the first
+        simulation, or be converted into them by unit_conversions.
     climatology, phenology, long_term, seasonal, transects, map_changes, stations, subregions, lon_lim, lat_lim :
         As in analyze(). Everything is the same for every simulation, and the
         years must be years that every simulation has.
@@ -354,10 +439,32 @@ def compare_simulations(
         each on its own. {"lon": [west, east], "lat": [south, north], "res":
         degrees} puts all of them on a lon-lat grid of that box and
         resolution (with nctoolkit's to_latlon). {"baseline": name} puts the
-        others on the grid of simulation name (with nctoolkit's regrid). In
-        both, a cell with no value in any one simulation is missing in all of
-        them (judged from each one's first time step), so every simulation is
-        compared over exactly the same cells.
+        others on the grid of simulation name (with nctoolkit's regrid). Either
+        can also have "regrid": how they are regridded, one of "bil"
+        (bilinear, the default), "nn" (nearest neighbour), "dis"
+        (distance-weighted) or "con" (conservative), e.g. {"baseline": "Base",
+        "regrid": "nn"}. In both, a cell with no value in any one simulation is
+        missing in all of them (judged from each one's second time step, or its first
+        if it has only one), so
+        every simulation is compared over exactly the same cells.
+    domain_mask : str or None
+        Compare only part of the domain: the path of a netCDF file with a single
+        variable at a single time step, 1 in the cells wanted and 0 or missing
+        elsewhere. Every simulation is regridded to the file's grid by nearest
+        neighbour (after unify, if that is given) and only the cells of 1 are
+        kept, so all the simulations end on the file's grid. A copy of the mask
+        is kept in the results.
+    unit_conversions : dict or None
+        How to turn a simulation's values of a variable into the units the first
+        simulation gives it in, as value x multiplier + adder, for each variable
+        and simulation that needs it, e.g. {"Temperature": {"Warm": {"multiplier":
+        1, "adder": -273.15}}} for a simulation in K compared with one in degC.
+        The multiplier (default 1) must be more than 0, and the adder defaults to
+        0: {"multiplier": 1, "adder": 0} says units written otherwise (e.g.
+        degree_Celsius) are the first simulation's. The first simulation is never converted: its units are the ones the
+        comparison is in. The values are converted as they are read, so every
+        analysis (and a water column's integral) is of the converted values, and
+        as_missing is in the simulation's own units.
     thickness, time_shift, as_missing :
         As in analyze(), for the simulations that do not give their own.
     out_dir : str
@@ -391,7 +498,9 @@ def compare_simulations(
     sims = check_simulations(simulations, thickness, time_shift, as_missing)
     names = [sim["name"] for sim in sims]
     by_sim = check_variables(variables, names)
+    conversions = check_unit_conversions(unit_conversions, variables, names)
     unify = sim_unify.check_unify(unify, names)
+    domain_mask = domain_mask_mod.check(domain_mask)
     out_dir = os.path.abspath(out_dir or ".")
     if os.path.isfile(out_dir):
         raise ValueError(f"out_dir, {out_dir}, is a file, not a directory.")
@@ -437,10 +546,19 @@ def compare_simulations(
             problems.extend(f"{sim['name']}: {line}" for line in str(error).splitlines())
     if not problems:
         for number, row in enumerate(rows_by_sim[names[0]]):
+            # a simulation converted is in the first one's units once it is read (see analysis._model_data)
+            for name, (multiplier, adder) in conversions.get(row["name"], {}).items():
+                own = rows_by_sim[name][number]
+                own["convert"] = (multiplier, adder)
+                own["units_given"] = own["units"]
+                own["units"] = row["units"]
             units = {name: rows_by_sim[name][number]["units"] for name in names}
             if len({value for value in units.values() if value}) > 1:
                 shown = "; ".join(f"{name}: {value or 'none'}" for name, value in units.items())
-                problems.append(f"{row['name']} is not in the same units in every simulation ({shown}).")
+                problems.append(
+                    f"{row['name']} is not in the same units in every simulation ({shown}): give unit_conversions "
+                    f"to convert it into the units of {names[0]}."
+                )
     if unify is not None and not problems:
         for number, row in enumerate(rows_by_sim[names[0]]):
             counts = {name: rows_by_sim[name][number]["levels"] for name in names}
@@ -469,7 +587,14 @@ def compare_simulations(
         for sim in sims:
             for row in rows_by_sim[sim["name"]]:
                 row["unify"] = sim_unify.row_unify(unify, unify_dir, sim["name"])
-    same_grid = True if unify is not None else _same_grid(rows_by_sim, sims)
+    # the mask is kept with the results, and every simulation ends on its grid
+    mask_kept = domain_mask_mod.keep(domain_mask, results_dir)
+    if mask_kept is not None:
+        mask_kept["variable"] = domain_mask_mod.inspect(mask_kept["path"])[0].name
+        for sim in sims:
+            for row in rows_by_sim[sim["name"]]:
+                row["domain_mask"] = mask_kept
+    same_grid = True if unify is not None or mask_kept is not None else _same_grid(rows_by_sim, sims)
 
     from oceanval import __version__, analysis_report, sim_report
 
@@ -506,7 +631,13 @@ def compare_simulations(
         "simulations": [{k: v for k, v in sim.items()} for sim in sims],
         "colours": colours,
         "unify": unify,
+        "unit_conversions": {
+            variable: {name: {"multiplier": m, "adder": a} for name, (m, a) in by_sim.items()}
+            for variable, by_sim in conversions.items()
+        },
         "unify_text": sim_unify.describe(unify),
+        "domain_mask": None if mask_kept is None else os.path.relpath(mask_kept["path"], results_dir),
+        "domain_mask_text": describe_mask(mask_kept),
         "same_grid": same_grid,
         "shared_cells": cells,
         "subregions": area["subregions"],
@@ -555,6 +686,21 @@ def compare_simulations(
                         "units": first["units"],
                         "kinds": [kind for kind in KINDS if first.get(kind)],
                         "model_variables": {name: rows_by_sim[name][number]["model_variable"] for name in names},
+                        # the simulations whose values were converted into the first's units
+                        "conversions": {
+                            name: {
+                                "from": rows_by_sim[name][number]["units_given"],
+                                "multiplier": rows_by_sim[name][number]["convert"][0],
+                                "adder": rows_by_sim[name][number]["convert"][1],
+                                "text": describe_conversion(
+                                    rows_by_sim[name][number]["units_given"],
+                                    *rows_by_sim[name][number]["convert"],
+                                    first["units"],
+                                ),
+                            }
+                            for name in names
+                            if rows_by_sim[name][number].get("convert")
+                        },
                         "sims": entries,
                     }
                 )

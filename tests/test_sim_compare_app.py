@@ -5,11 +5,12 @@ step Analyze shares, which ends in the run."""
 import ast
 import os
 import threading
+import time
 
 import numpy as np
 import pytest
 
-from oceanval import analysis, sim_compare, sim_compare_forms
+from oceanval import analysis, sim_compare, sim_compare_forms, sim_unify
 from oceanval.app import App
 from simulations import write_analysis_simulation, write_folders
 from test_app import get, get_json, leftover_dir, post, wait_for  # noqa: F401 (leftover_dir is autouse)
@@ -148,9 +149,9 @@ class TestSimulations:
         status, reply = post(app, "/api/simcompare_sims", {"form": form})
         assert status == 400 and "same name" in reply["errors"]["rows"]["1"]["name"]
 
-    def test_the_files_skipped_start_with_restart_and_a_row_of_only_that_is_unused(self, app, sims, tmp_path):
-        assert sim_compare_forms.blank_sim()["exclude"] == "restart"
-        assert state(app)["default_exclude"] == "restart"
+    def test_the_files_skipped_start_empty_and_a_row_of_nothing_is_unused(self, app, sims, tmp_path):
+        assert sim_compare_forms.blank_sim()["exclude"] == ""
+        assert "default_exclude" not in state(app)
         # the rows as they start are no simulations, and nothing is wrong with them
         assert sim_compare_forms.check_sims(sim_compare_forms.default_sims_form(str(tmp_path)), str(tmp_path)) == (
             None, {"simulations": "Give at least two simulations to compare."})
@@ -264,21 +265,6 @@ class TestVariables:
         assert "Fine run" in reply["errors"]["1"]["models"]
         assert post(app, "/api/simcompare_variables", {"rows": []})[1]["errors"] == {"rows": "Add a variable to compare."}
 
-    def test_the_units_must_agree(self, app, sims, tmp_path):
-        import glob
-
-        import xarray as xr
-
-        for path in glob.glob(str(tmp_path / "fine" / "*" / "*grid_T.nc")):
-            with xr.open_dataset(path) as ds:
-                ds = ds.load()
-            ds["thetao"].attrs["units"] = "K"
-            ds.to_netcdf(path)
-        to_variables(app)
-        status, reply = post(app, "/api/simcompare_variables", {"rows": ROWS[1:]})
-        assert status == 400
-        assert "in K here, and in degC in Base run" in reply["errors"]["0"]["models"]["Fine run"]
-
     def test_the_variables_are_placed_in_every_simulation(self, app, sims):
         shown = to_files(app)
         assert app.view == "simcompare_files"
@@ -294,6 +280,126 @@ class TestVariables:
         assert post(app, "/api/back", {"rows": ROWS})[0] == 200
         assert app.view == "simcompare_sims"
         assert state(app)["simcompare"]["rows"][0]["models"] == ROWS[0]["models"]
+
+
+def in_kelvin(folder):
+    """The temperature of the simulation in folder given in K, as it is in degC."""
+    import glob
+
+    import xarray as xr
+
+    for path in glob.glob(os.path.join(folder, "*", "*grid_T.nc")):
+        with xr.open_dataset(path) as ds:
+            ds = ds.load()
+        ds["thetao"] = (ds["thetao"] + 273.15).assign_attrs(ds["thetao"].attrs, units="K")
+        # replaced, not written over: HDF5 refuses to open for writing a file this process still holds open
+        # (the window's reads can leave one), which comes out as a PermissionError
+        ds.to_netcdf(path + ".tmp")
+        os.replace(path + ".tmp", path)
+
+
+# the boxes of the units step for the one row of TestUnits: OceanVal's suggestion
+SUGGESTED = {"1:1": {"multiplier": "", "adder": "-273.15"}}
+
+
+class TestUnits:
+    """A simulation in other units than the first's is converted into them, as validate's units step converts the
+    observations into the model's: a page for each simulation that needs one, which must be confirmed."""
+
+    @pytest.fixture
+    def kelvin(self, app, sims, tmp_path):
+        in_kelvin(str(tmp_path / "fine"))
+        to_variables(app)
+        assert post(app, "/api/simcompare_variables", {"rows": ROWS}) == (200, {"ok": True})
+        return state(app)["simcompare"]
+
+    def test_units_not_the_firsts_are_asked_about(self, app, kelvin):
+        assert app.view == "simcompare_units"
+        assert kelvin["units"]["boxes"] == {}
+        # chlorophyll is in the same units in both: only temperature has a row
+        [row] = kelvin["units"]["rows"]
+        assert row["key"] == "1:1"
+        assert row["simulation"] == "Fine run" and row["variable"] == "Temperature"
+        assert row["model_variable"] == "thetao" and row["units"] == "K"
+        assert row["baseline"] == {"simulation": "Base run", "model_variable": "thetao", "units": "degC"}
+        assert row["check"]["status"] == "convert"
+        assert (row["check"]["multiplier"], row["check"]["adder"]) == (1, -273.15)
+
+    def test_the_units_must_be_confirmed(self, app, kelvin):
+        status, reply = post(app, "/api/simcompare_units", {"conversions": SUGGESTED})
+        assert status == 400 and reply["error"] == "Confirm the units before carrying on."
+        assert app.view == "simcompare_units"
+
+    @pytest.mark.parametrize(
+        "boxes, said",
+        [
+            ({"multiplier": "abc", "adder": ""}, "Multiply by a number that is not 0"),
+            ({"multiplier": "0", "adder": ""}, "Multiply by a number that is not 0"),
+            ({"multiplier": "-1", "adder": ""}, "more than 0"),
+        ],
+    )
+    def test_boxes_that_cannot_be_used_are_said(self, app, kelvin, boxes, said):
+        status, reply = post(app, "/api/simcompare_units", {"conversions": {"1:1": boxes}, "confirmed": True})
+        assert status == 400 and said in reply["errors"]["1:1"]
+        # kept for the page as they were
+        assert state(app)["simcompare"]["units"]["boxes"]["1:1"] == boxes
+
+    def test_continue_goes_on_to_the_files_with_the_conversions(self, app, kelvin):
+        assert post(app, "/api/simcompare_units", {"conversions": SUGGESTED, "confirmed": True}) == (200, {"ok": True})
+        assert app.view == "simcompare_files"
+        assert app.sc_conversions == {"Temperature": {"Fine run": {"multiplier": 1, "adder": -273.15}}}
+        # the checks of the files went on while the units were asked about
+        wait_for(lambda: app._sc_checks_done())
+
+    def test_blank_boxes_say_the_units_are_the_firsts(self, app, kelvin):
+        blank = {"1:1": {"multiplier": "", "adder": ""}}
+        assert post(app, "/api/simcompare_units", {"conversions": blank, "confirmed": True}) == (200, {"ok": True})
+        assert app.sc_conversions == {"Temperature": {"Fine run": {"multiplier": 1, "adder": 0}}}
+
+    def test_back_keeps_the_boxes(self, app, kelvin):
+        typed = {"1:1": {"multiplier": "1", "adder": "-273"}}
+        assert post(app, "/api/simcompare_units", {"conversions": typed, "confirmed": True})[0] == 200
+        # from the files to the units, and from the units to the variables
+        assert post(app, "/api/back", {})[0] == 200
+        assert app.view == "simcompare_units"
+        assert state(app)["simcompare"]["units"]["boxes"] == typed
+        assert post(app, "/api/back", {"conversions": SUGGESTED})[0] == 200
+        assert app.view == "simcompare_variables"
+        assert post(app, "/api/simcompare_variables", {"rows": ROWS}) == (200, {"ok": True})
+        assert state(app)["simcompare"]["units"]["boxes"] == SUGGESTED
+
+    def test_no_step_once_the_units_are_the_same(self, app, kelvin, tmp_path):
+        assert post(app, "/api/back", {"conversions": {"1:1": {"multiplier": "", "adder": "5"}}})[0] == 200
+        # both simulations in K, read afresh (as other simulations): nothing to convert
+        in_kelvin(str(tmp_path / "base"))
+        assert post(app, "/api/back", {})[0] == 200
+        assert post(app, "/api/simcompare_sims", {"form": sims_form(rows=[
+            {"name": "Base run", "simdir": "fine", "ndown": "1", "exclude": "", "require": ""},
+            {"name": "Fine run", "simdir": "base", "ndown": "1", "exclude": "", "require": ""},
+        ])}) == (200, {"ok": True})
+        wait_for(lambda: app._sc_all_read())
+        assert post(app, "/api/simcompare_variables", {"rows": ROWS}) == (200, {"ok": True})
+        assert app.view == "simcompare_files" and app.sc_conversions == {}
+
+    def test_the_script_converts_them(self, app, kelvin, runs):
+        assert post(app, "/api/simcompare_units", {"conversions": SUGGESTED, "confirmed": True})[0] == 200
+        wait_for(lambda: app._sc_checks_done())
+        assert post(app, "/api/simcompare_files") == (200, {"ok": True})
+        assert post(app, "/api/simcompare_grids", {"form": {"need": "no"}}) == (200, {"ok": True})
+        assert post(app, "/api/analyze_option", {"kind": "climatology", "form": CLIMATOLOGY}) == (200, {"ok": True})
+        assert post(app, "/api/analyze_option", {"kind": "cores", "form": {"cores": "2"}})[0] == 200
+        assert post(app, "/api/analyze_option", {"kind": "figure_code", "form": {"choice": "no"}})[0] == 200
+        assert post(app, "/api/analyze_save_script", OUTPUT) == (200, {"ok": True})
+        call = ast.parse(open(os.path.join(app.cwd, "comparison.py")).read()).body[-1].value
+        given = {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords}
+        assert given["unit_conversions"] == {"Temperature": {"Fine run": {"multiplier": 1, "adder": -273.15}}}
+        sim_compare.check_unit_conversions(given["unit_conversions"], given["variables"], ["Base run", "Fine run"])
+
+    def test_the_same_units_have_no_step(self, app, sims, runs):
+        to_files(app)
+        assert app.view == "simcompare_files" and app.sc_unit_rows == [] and app.sc_conversions == {}
+        assert post(app, "/api/back", {})[0] == 200
+        assert app.view == "simcompare_variables"
 
 
 class TestFiles:
@@ -457,11 +563,236 @@ class TestGrids:
         to_options(app, box)
         assert app.sc_unify == {"lon": [-4.0, 0.0], "lat": [50.0, 53.0], "res": 0.5}
 
+    def test_how_they_are_regridded(self, app, sims):
+        to_options(app, {"need": "yes", "method": "baseline", "baseline": "Fine run", "regrid": "nn"})
+        assert app.sc_unify == {"baseline": "Fine run", "regrid": "nn"}
+
+    def test_a_box_regridded(self, app, sims):
+        box = {"need": "yes", "method": "box", "lon_min": "-4", "lon_max": "0", "lat_min": "50", "lat_max": "53",
+               "res": "0.5", "regrid": "dis"}
+        to_options(app, box)
+        assert app.sc_unify == {"lon": [-4.0, 0.0], "lat": [50.0, 53.0], "res": 0.5, "regrid": "dis"}
+
+    def test_a_method_that_is_not_one_is_bilinear(self, app, sims):
+        to_options(app, {"need": "yes", "method": "baseline", "baseline": "Fine run", "regrid": "best"})
+        assert app.sc_unify == {"baseline": "Fine run"}
+
+    def test_the_methods_and_what_is_drawn_of_each_simulation_are_sent(self, app, sims):
+        shown = to_grids(app)
+        assert list(shown["regrid_methods"]) == ["bil", "nn", "dis", "con"]
+        # the first variable's first file, and the model variable read from it (the first of a sum)
+        assert [field["variable"] for field in shown["grid_fields"]] == ["P1_Chl", "P1_Chl"]
+        assert all(field["file"].endswith(".nc") for field in shown["grid_fields"])
+
+    def test_each_simulation_is_drawn(self, app, sims):
+        to_grids(app)
+        status, reply = post(app, "/api/simcompare_panel", {"number": 2})
+        assert status == 200 and reply["ok"], reply
+        assert reply["variable"] == "P1_Chl" and reply["item"]
+        assert post(app, "/api/simcompare_panel", {"number": 3})[0] == 400
+        assert post(app, "/api/simcompare_panel", {"number": 0})[0] == 400
+
+    def test_the_maps_are_of_the_second_time_step(self, app, sims, monkeypatch):
+        """The second time step of each simulation, which the unified grid is made from too."""
+        from oceanval import grid_align
+
+        to_grids(app)
+        files = app.sc_placed["Fine run"][0]["files"]
+        reply = post(app, "/api/simcompare_panel", {"number": 2})[1]
+        # a file a year of monthly output: the first file's second month
+        assert reply["ok"] and (reply["file"], reply["step"]) == (os.path.basename(files[0]), 2)
+        steps = []
+        real = grid_align.field_for_cdo
+        monkeypatch.setattr(grid_align, "field_for_cdo", lambda *args: steps.append(args[-1]) or real(*args))
+        form = {"need": "yes", "method": "baseline", "baseline": "Fine run"}
+        assert post(app, "/api/simcompare_generate", {"form": form})[1]["ok"]
+        assert steps == [1, 1]
+
+    def test_a_file_of_one_time_step_gives_the_next_files_first(self, app, tmp_path):
+        """The simulation's second time step, wherever it is: a first file of one time is followed by the next's."""
+        files = [str(tmp_path / "a.nc"), str(tmp_path / "b.nc")]
+        counts = {files[0]: 1, files[1]: 1}
+
+        class Times:
+            def __init__(self, path, checks=False):
+                self.times = [0] * counts[path]
+
+        import oceanval.sim_compare_app as module
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(module.nc, "open_data", Times)
+            assert app._sc_field_step(files) == (files[1], 0)
+            # worked out once for each first file
+            counts[files[0]] = 5
+            assert app._sc_field_step(files) == (files[1], 0)
+            # a simulation of one time step has only its first
+            assert app._sc_field_step([files[1]]) == (files[1], 0)
+
+    def test_the_unified_grid_is_a_preview_on_a_baseline(self, app, sims):
+        to_grids(app)
+        form = {"need": "yes", "method": "baseline", "baseline": "Fine run", "regrid": "nn"}
+        status, reply = post(app, "/api/simcompare_generate", {"form": form})
+        assert status == 200 and reply["ok"], reply
+        assert 0 < reply["shared"] <= reply["total"] and reply["item"]
+        # the grid of the baseline: the half degree one
+        assert reply["total"] == len(B_LATS) * len(B_LONS)
+        # a preview: nothing is chosen by it
+        assert app.sc_unify is None and app.view == "simcompare_grids"
+
+    def test_the_state_says_what_generating_is_doing(self, app, sims, monkeypatch):
+        to_grids(app)
+        assert state(app)["simcompare"]["stage"] is None
+        entered, release = threading.Event(), threading.Event()
+        real = sim_unify.crop_to
+        said = []
+
+        def held(ds, box):
+            entered.set()
+            assert release.wait(60)
+            return real(ds, box)
+
+        monkeypatch.setattr(sim_unify, "crop_to", held)
+        progress = app._sc_progress
+        monkeypatch.setattr(app, "_sc_progress", lambda *args: said.append(sim_unify.stage_text(*args)) or progress(*args))
+        form = {"need": "yes", "method": "baseline", "baseline": "Fine run"}
+        done = []
+        thread = threading.Thread(target=lambda: done.append(post(app, "/api/simcompare_generate", {"form": form})))
+        thread.start()
+        try:
+            assert entered.wait(60)
+            assert state(app)["simcompare"]["stage"] == "Cropping Base run…"
+        finally:
+            release.set()
+            thread.join(120)
+        assert done[0][0] == 200 and done[0][1]["ok"], done
+        # cropping, regridding and unifying, in that order, each said once
+        assert said == ["Cropping Base run…", "Regridding Base run…", "Unifying the simulations…"]
+        assert state(app)["simcompare"]["stage"] is None
+
+    def test_the_unified_grid_is_a_preview_on_a_box(self, app, sims):
+        to_grids(app)
+        box = {"need": "yes", "method": "box", "lon_min": "-4", "lon_max": "0", "lat_min": "50", "lat_max": "53", "res": "0.5"}
+        status, reply = post(app, "/api/simcompare_generate", {"form": box})
+        assert status == 200 and reply["ok"], reply
+        # nctoolkit's to_latlon has cells on both edges of the box
+        assert reply["total"] == 9 * 7 and 0 < reply["shared"] <= reply["total"]
+
+    @pytest.mark.parametrize(
+        "form, boxes",
+        [
+            ({}, {"need"}),
+            ({"need": "no"}, {"need"}),
+            ({"need": "yes"}, {"method"}),
+            ({"need": "yes", "method": "baseline"}, {"baseline"}),
+            ({"need": "yes", "method": "box", "lon_min": "x"}, {"lon_min", "lon_max", "lat_min", "lat_max", "res"}),
+        ],
+    )
+    def test_the_preview_is_checked_as_continue_is(self, app, sims, form, boxes):
+        to_grids(app)
+        status, reply = post(app, "/api/simcompare_generate", {"form": form})
+        assert status == 400 and set(reply["errors"]) == boxes
+
+    def test_the_preview_and_the_maps_are_for_the_grids_step_only(self, app, sims):
+        to_options(app)
+        assert post(app, "/api/simcompare_panel", {"number": 1})[0] == 409
+        assert post(app, "/api/simcompare_generate", {"form": {"need": "yes", "method": "baseline", "baseline": "Fine run"}})[0] == 409
+
     def test_back_keeps_the_boxes(self, app, sims):
         to_grids(app)
         assert post(app, "/api/back", {"form": {"need": "yes", "method": "box", "res": "0.25"}})[0] == 200
         assert app.view == "simcompare_files"
         assert state(app)["simcompare"]["unify_form"]["res"] == "0.25"
+
+
+def write_mask(path):
+    """A mask on the usual grid, 1 from longitude -2 eastwards."""
+    import xarray as xr
+
+    from simulations import ANALYSIS_LATS, ANALYSIS_LONS
+
+    lon, lat = np.array(ANALYSIS_LONS), np.array(ANALYSIS_LATS)
+    values = np.where(lon[None, :] >= -2.0, 1.0, 0.0) * np.ones((lat.size, 1))
+    coords = {
+        "lat": ("lat", lat, {"units": "degrees_north", "standard_name": "latitude"}),
+        "lon": ("lon", lon, {"units": "degrees_east", "standard_name": "longitude"}),
+    }
+    xr.DataArray(values.astype("f4"), coords=coords, dims=("lat", "lon"), name="wanted").to_dataset().to_netcdf(path)
+    return str(path)
+
+
+class TestDomainMask:
+    """The grids step's question: No to start, a file for Yes, checked and drawn as validate's is, and written
+    into the script."""
+
+    def test_no_to_start(self, app, sims):
+        shown = to_grids(app)
+        assert shown["unify_form"]["domain_mask"] == "no" and shown["unify_form"]["domain_mask_path"] == ""
+        assert post(app, "/api/simcompare_grids", {"form": {"need": "no"}}) == (200, {"ok": True})
+        assert app.sc_domain_mask is None
+
+    def test_the_file_is_checked_when_the_step_is_left(self, app, sims, tmp_path):
+        mask = write_mask(tmp_path / "mask.nc")
+        to_options(app, {"need": "no", "domain_mask": "yes", "domain_mask_path": mask})
+        assert app.view == "analyze_options" and app.sc_domain_mask == mask
+
+    def test_a_relative_path_is_from_the_directory_worked_in(self, app, sims, tmp_path):
+        write_mask(tmp_path / "mask.nc")
+        to_options(app, {"need": "no", "domain_mask": "yes", "domain_mask_path": "mask.nc"})
+        assert app.sc_domain_mask == str(tmp_path / "mask.nc")
+
+    @pytest.mark.parametrize("path, error", [("", "Give the path"), ("nothing.nc", "There is no file there.")])
+    def test_yes_needs_a_file_that_is_a_mask(self, app, sims, path, error):
+        to_grids(app)
+        form = {"need": "no", "domain_mask": "yes", "domain_mask_path": path}
+        status, reply = post(app, "/api/simcompare_grids", {"form": form})
+        assert status == 400 and list(reply["errors"]) == ["domain_mask_path"]
+        assert reply["errors"]["domain_mask_path"].startswith(error)
+        assert app.view == "simcompare_grids"
+
+    def test_a_file_typed_with_no_is_not_used(self, app, sims, tmp_path):
+        to_options(app, {"need": "no", "domain_mask": "no", "domain_mask_path": write_mask(tmp_path / "mask.nc")})
+        assert app.sc_domain_mask is None
+
+    def test_it_goes_with_unify(self, app, sims, tmp_path):
+        mask = write_mask(tmp_path / "mask.nc")
+        to_options(app, {"need": "yes", "method": "baseline", "baseline": "Fine run", "domain_mask": "yes", "domain_mask_path": mask})
+        assert app.sc_unify == {"baseline": "Fine run"} and app.sc_domain_mask == mask
+
+    def test_the_map_is_drawn_on_the_grids_step_only(self, app, sims, tmp_path):
+        mask = write_mask(tmp_path / "mask.nc")
+        assert post(app, "/api/domain_mask", {"path": mask})[0] == 409
+        to_grids(app)
+        status, reply = post(app, "/api/domain_mask", {"path": mask})
+        assert status == 200 and reply["ok"], reply
+        assert (reply["kept"], reply["total"]) == (12, 20) and reply["item"]["doc"]
+        assert post(app, "/api/domain_mask", {"path": "nothing.nc"}) == (
+            200, {"ok": False, "error": "There is no file there."})
+        assert post(app, "/api/simcompare_grids", {"form": {"need": "no"}}) == (200, {"ok": True})
+        assert post(app, "/api/domain_mask", {"path": mask})[0] == 409
+
+    def test_back_keeps_the_boxes(self, app, sims, tmp_path):
+        mask = write_mask(tmp_path / "mask.nc")
+        to_grids(app)
+        form = {"need": "no", "domain_mask": "yes", "domain_mask_path": mask}
+        assert post(app, "/api/back", {"form": form})[0] == 200
+        shown = state(app)["simcompare"]["unify_form"]
+        assert (shown["domain_mask"], shown["domain_mask_path"]) == ("yes", mask)
+
+    def test_the_script_has_it_only_when_there_is_one(self, app, sims, runs, tmp_path):
+        mask = write_mask(tmp_path / "mask.nc")
+        to_options(app, {"need": "no", "domain_mask": "yes", "domain_mask_path": mask})
+        post(app, "/api/analyze_option", {"kind": "climatology", "form": CLIMATOLOGY})
+        post(app, "/api/analyze_option", {"kind": "cores", "form": {"cores": "1"}})
+        post(app, "/api/analyze_option", {"kind": "figure_code", "form": {"choice": "no"}})
+        assert post(app, "/api/analyze_run", OUTPUT) == (200, {"ok": True})
+        call = ast.parse(open(os.path.join(app.cwd, "comparison.py")).read()).body[-1].value
+        given = {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords}
+        assert given["domain_mask"] == mask
+
+    def test_the_form_is_cleaned(self):
+        clean = sim_compare_forms.clean_unify({"domain_mask": "YES", "domain_mask_path": "  Mask.nc "})
+        assert clean["domain_mask"] == "yes" and clean["domain_mask_path"] == "Mask.nc"
+        assert sim_compare_forms.clean_unify({"domain_mask": "maybe"})["domain_mask"] == "no"
 
 
 CLIMATOLOGY = {
@@ -509,14 +840,14 @@ class TestOptionsAndRun:
         assert post(app, "/api/analyze_option", {"kind": "figure_code", "form": {"choice": "no"}})[0] == 200
         # the boxes of the last page are not the first page's: it starts with them
         assert state(app)["analyze"]["output"] == {
-            "out_dir": app.cwd, "out": "simulation_comparison.py", "replace_analysis": False}
+            "out_dir": app.cwd, "out": "simulation_comparison.py", "out_typed": False, "replace_analysis": False}
         status, reply = post(app, "/api/analyze_run", {"form": {"out_dir": "", "out": ""}})
         assert status == 400 and set(reply["errors"]) == {"out"} and runs == []
         os.makedirs(os.path.join(app.cwd, "somewhere"))
         status, reply = post(app, "/api/analyze_run", {"form": {"out_dir": "", "out": "somewhere"}})
         assert status == 400 and set(reply["errors"]) == {"out"}
         # what was sent is kept for the page, and the script goes where it says
-        assert state(app)["analyze"]["output"] == {"out_dir": "", "out": "somewhere", "replace_analysis": False}
+        assert state(app)["analyze"]["output"] == {"out_dir": "", "out": "somewhere", "out_typed": False, "replace_analysis": False}
         assert post(app, "/api/analyze_save_script", {"form": {"out_dir": "", "out": "mine.py"}}) == (200, {"ok": True})
         assert os.path.exists(os.path.join(app.cwd, "mine.py"))
 
@@ -705,14 +1036,15 @@ def test_phenology_is_ticked_in_a_browser(browser, tmp_path):
         assert "Chlorophyll" in page.inner_text("#ao-phenology-text")
         page.click("#ao-continue")
         page.wait_for_selector("#ao-page-2:not([hidden])")
-        assert page.inner_text("#title") == "How should the comparison be run?"
+        assert page.is_hidden("#title")
         assert page.is_disabled("#ao-next")
         page.select_option("#ao-cores", "1")
         page.check("#ao-code-no")
         page.click("#ao-next")
         page.wait_for_selector("#ao-page-3:not([hidden])")
         # where the comparison is saved is asked last, for it, and has no tick to replace anything
-        assert page.inner_text("#title") == "Where do you want the comparison to be saved?"
+        assert page.is_hidden("#title")
+        assert page.inner_text("#ao-save-lede") == "Choose where to save the comparison"
         assert page.input_value("#ao-out") == "simulation_comparison.py" and page.is_hidden("#ao-row-replace")
         assert page.inner_text("#ao-run") == "Run the comparison"
         assert page.inner_text("#ao-save") == "Save Python script to run later"
@@ -772,23 +1104,31 @@ def test_a_simulation_row_fills_in_the_directories_down_from_the_layout(browser,
     url = app.start()
     page = browser.new_page(viewport={"width": 1280, "height": 1000})
     try:
+        page.add_init_script("window.__keepFolderStructure = true")
         page.goto(url)
         page.wait_for_selector("#view-home:not([hidden])")
         page.click("#home-simcompare")
         page.wait_for_selector("#view-simcompare-sims:not([hidden])")
         page.fill("#sc-dir_1", "months")
         page.wait_for_function("document.querySelector('#sc-ndown_1').value === '2'")
-        assert page.locator("#sc-ndown_1").evaluate("node => node.classList.contains('is-detected')")
-        page.wait_for_function(
-            "document.querySelector('#sc-m-1').innerText.includes('Folder structure was identified as YYYY/MM/**.nc')"
-        )
+        box = page.locator("#sc-ndown_1")
+        assert box.evaluate("node => node.classList.contains('is-detected')")
+        assert box.evaluate("node => getComputedStyle(node).fontWeight") == "700"
+        popout = page.locator("#folder-structure")
+        popout.wait_for(state="visible")
+        assert "For Simulation 1, it looks like the folder structure is YYYY/MM/**.nc" in popout.inner_text()
+        assert "directories down is assumed to be 2" in popout.inner_text()
+        assert "Folder structure was identified" not in page.inner_text("#sc-m-1")
+        page.click("#folder-structure-continue")
+        assert popout.is_hidden()
         page.fill("#sc-dir_2", "flat")
         page.wait_for_function("document.querySelector('#sc-ndown_2').value === '0'")
-        assert "Folder structure was identified as *.nc" in page.inner_text("#sc-m-2")
+        popout.wait_for(state="visible")
+        assert "For Simulation 2, it looks like the folder structure is *.nc" in popout.inner_text()
+        page.click("#folder-structure-continue")
         # typing over it makes it the user's, and the suggestion goes
         page.fill("#sc-ndown_1", "1")
         assert not page.locator("#sc-ndown_1").evaluate("node => node.classList.contains('is-detected')")
-        assert "Folder structure" not in page.inner_text("#sc-m-1")
         # a directory without the layout empties what OceanVal filled in
         page.fill("#sc-dir_2", "base")
         page.wait_for_function("document.querySelector('#sc-ndown_2').value === ''")
@@ -796,7 +1136,7 @@ def test_a_simulation_row_fills_in_the_directories_down_from_the_layout(browser,
         app.close()
 
 
-def test_a_simulation_row_starts_skipping_restart_files_in_amber(browser, tmp_path):
+def test_a_simulation_row_starts_skipping_nothing(browser, tmp_path):
     write_analysis_simulation(str(tmp_path / "base"), years=(2013, 2014), daily=False)
     app = App(cwd=str(tmp_path))
     url = app.start()
@@ -807,18 +1147,19 @@ def test_a_simulation_row_starts_skipping_restart_files_in_amber(browser, tmp_pa
         page.wait_for_selector("#view-home:not([hidden])")
         page.click("#home-simcompare")
         page.wait_for_selector("#view-simcompare-sims:not([hidden])")
-        # every row starts with it, in amber, but an unused row is not a simulation to name
-        assert [page.input_value(f"#sc-exclude_{n}") for n in (1, 2)] == ["restart", "restart"]
-        assert amber(1) and amber(2)
+        # every row starts with nothing skipped, and an unused row is not a simulation to name
+        assert [page.input_value(f"#sc-exclude_{n}") for n in (1, 2)] == ["", ""]
+        assert not amber(1) and not amber(2)
         assert page.is_hidden("#sc-row-3")
         assert "skipped" not in page.inner_text("#sc-m-1")
         assert "Give this simulation a name" not in page.inner_text("#sc-m-1")
         page.fill("#sc-dir_1", "base")
-        page.wait_for_function("document.querySelector('#sc-m-1').innerText.includes('Files with restart in their names are skipped. Remove restart to include them.')")
+        page.wait_for_function("document.querySelector('#sc-m-1').innerText.includes('Folder structure') || true")
+        assert "skipped" not in page.inner_text("#sc-m-1")
         # a row added starts the same way
         page.click("#sc-add")
-        assert page.input_value("#sc-exclude_3") == "restart" and amber(3)
-        # changing it makes it the user's, and the line goes
+        assert page.input_value("#sc-exclude_3") == "" and not amber(3)
+        # changing it
         page.click("#sc-row-1 summary")
         page.fill("#sc-exclude_1", "restart 5d")
         assert not amber(1)
@@ -870,13 +1211,36 @@ def test_comparing_simulations_in_a_browser(browser, tmp_path):
         assert page.locator("#scv-rows > tr").count() == 1
         cells = page.locator("#scv-rows > tr").first.locator("input.s-input")
         assert cells.count() == 3
-        # a simulation's pop-out is searched with wildcards
-        pop_out = page.locator("#scv-rows > tr").first.locator("details.vars").first
-        pop_out.locator("summary").click()
-        page.wait_for_function("() => document.activeElement && document.activeElement.classList.contains('vars__search')")
-        pop_out.locator(".vars__search").fill("P*_Chl")
-        assert pop_out.locator("tbody tr:not([hidden]) td:nth-child(2)").all_text_contents() == ["P1_Chl", "P2_Chl"]
-        pop_out.locator("summary").click()
+        # each row has its + and × in one box: + adds a row directly below this one
+        names = lambda: [page.locator("#scv-rows > tr").nth(n).locator("input.s-input").first.input_value()
+                         for n in range(page.locator("#scv-rows > tr").count())]
+        page.locator("#scv-rows > tr").first.locator("input.s-input").first.fill("A")
+        page.locator("#scv-rows > tr").first.locator(".analyze-pill .analyze-add").click()
+        assert names() == ["A", ""]
+        page.locator("#scv-rows > tr").nth(1).locator("input.s-input").first.fill("B")
+        page.locator("#scv-rows > tr").first.locator(".analyze-pill .analyze-add").click()
+        assert names() == ["A", "", "B"]
+        page.locator("#scv-rows > tr").nth(1).locator(".analyze-pill .analyze-remove").click()
+        page.locator("#scv-rows > tr").last.locator(".analyze-pill .analyze-remove").click()
+        assert names() == ["A"]
+        # a lone row with something in it can be removed: a blank row takes its place, with a grey ×
+        pill = page.locator("#scv-rows > tr").first.locator(".analyze-pill")
+        assert pill.locator(".analyze-remove").is_enabled()
+        pill.locator(".analyze-remove").click()
+        assert names() == [""]
+        assert pill.locator(".analyze-remove").is_disabled()
+        assert pill.locator(".analyze-add").is_enabled()
+        page.locator("#scv-rows > tr").first.locator("input.s-input").first.fill("C")
+        assert page.locator("#scv-rows > tr").first.locator(".analyze-remove").is_enabled()
+        pill.locator(".analyze-add").click()
+        assert page.locator("#scv-rows > tr").first.locator(".analyze-remove").is_enabled()
+        page.locator("#scv-rows > tr").first.locator(".analyze-remove").click()
+        assert names() == [""]
+        # a simulation's box lists its variables as it is typed in, with wildcards
+        assert page.locator("details.vars").count() == 0
+        cells.nth(1).fill("P*_Chl")
+        assert page.evaluate("() => [...document.querySelectorAll('.vars__popover:not([hidden]) tbody tr:not([hidden])')].map((row) => row.cells[1].textContent)") == ["P1_Chl", "P2_Chl"]
+        cells.nth(1).press("Escape")
         cells.nth(0).fill("Temperature")
         cells.nth(1).fill("thetao")
         cells.nth(2).fill("thetao")
@@ -918,7 +1282,7 @@ def test_comparing_simulations_in_a_browser(browser, tmp_path):
         page.wait_for_selector("#view-analyze-options:not([hidden])")
         assert page.is_visible("#ao-compare-note")
         # the tiles are the first page; the run buttons are on the second, once something is chosen
-        assert page.inner_text("#title") == "What do you want to compare?"
+        assert page.is_hidden("#title")
         assert page.is_disabled("#ao-continue")
         assert app.sc_unify == {"lon": [-4.0, 0.0], "lat": [50.0, 53.0], "res": 0.5}
 
@@ -985,3 +1349,104 @@ class TestClosingTheBrowser:
             assert app.closed_reason == "The browser window was closed."
         finally:
             release.set()
+
+
+def test_the_grids_step_shows_each_simulation_and_a_preview_in_a_browser(browser, app, sims, monkeypatch):
+    """Yes shows a map of each simulation and, after Generate unified grid, the
+    cells they share on the grid chosen, none of which Continue waits for."""
+    to_grids(app)
+    # each stage of generating is held for a moment, as it may be over before the page is told of it
+    said_progress = app._sc_progress
+    monkeypatch.setattr(app, "_sc_progress", lambda *args: said_progress(*args) or time.sleep(0.8))
+    page = browser.new_page(viewport={"width": 1400, "height": 1000})
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    try:
+        page.goto(app.url)
+        page.wait_for_selector("#view-simcompare-grids:not([hidden])")
+        # nothing is drawn, or asked of the files, until Yes
+        assert page.locator("#scg-grid .ag-card").count() == 0
+        page.check("#scg-need-no")
+        assert page.locator("#scg-grid .ag-card").count() == 0
+        page.check("#scg-need-yes")
+        page.wait_for_selector("#scg-map-1.is-drawn", timeout=60000)
+        page.wait_for_selector("#scg-map-2.is-drawn", timeout=60000)
+        # a card for each simulation, then the unified grid, and no plus: the simulations are given
+        assert page.locator("#scg-grid .ag-card").count() == 3
+        assert page.locator("#scg-add, #ag-add").count() == 0
+        assert "Base run" in page.text_content("#scg-title-1") and "Fine run" in page.text_content("#scg-title-2")
+        assert page.text_content("#scg-card-1 .ag-card__line:nth-of-type(2)").strip() == "Variable: P1_Chl"
+        # the choices, then Generate
+        assert page.is_hidden("#scg-controls") and page.is_disabled("#scg-continue")
+        page.check("#scg-method-baseline")
+        assert page.is_visible("#scg-controls") and page.is_disabled("#scg-generate")
+        page.select_option("#scg-baseline-select", "Fine run")
+        page.wait_for_function("() => !document.getElementById('scg-generate').disabled")
+        assert page.locator("#scg-regrid-select option").all_text_contents() == [
+            "Bilinear (default)", "Nearest neighbour", "Distance-weighted", "Conservative"]
+        page.select_option("#scg-regrid-select", "nn")
+        # the spinner beside the text while it is generated, which may be over in a moment, so it is watched for,
+        # with each thing said to be done
+        page.evaluate("""(id) => { window.sawSpinner = []; new MutationObserver(() => {
+            const busy = document.querySelector(`#${id} .ag-map__empty.is-busy`);
+            if (busy && busy.querySelector('.identify__spinner') && !window.sawSpinner.includes(busy.textContent)) window.sawSpinner.push(busy.textContent); })
+            .observe(document.getElementById(id), { childList: true, subtree: true }); }""", "scg-map-unified")
+        page.click("#scg-generate")
+        page.wait_for_selector("#scg-map-unified.is-drawn", timeout=60000)
+        said = page.evaluate("() => window.sawSpinner")
+        assert said[0] == "Putting the simulations on one grid…"
+        assert said[1:] == ["Cropping Base run…", "Regridding Base run…", "Unifying the simulations…"]
+        assert "have a value in every simulation" in page.text_content("#scg-unified-msg")
+        # a change makes it out of date, but does not stop Continue
+        page.select_option("#scg-regrid-select", "")
+        assert "Generate unified grid again" in page.text_content("#scg-map-unified")
+        assert page.is_enabled("#scg-continue")
+        # the box has the same maps and the same preview
+        page.check("#scg-method-box")
+        for box, text in (("lon_min", "-4"), ("lon_max", "0"), ("lat_min", "50"), ("lat_max", "53"), ("res", "0.5")):
+            page.fill(f"#scg-{box}", text)
+        page.click("#scg-generate")
+        page.wait_for_selector("#scg-map-unified.is-drawn", timeout=60000)
+        page.click("#scg-continue")
+        page.wait_for_selector("#view-analyze-options:not([hidden])")
+        assert app.sc_unify == {"lon": [-4.0, 0.0], "lat": [50.0, 53.0], "res": 0.5}
+        assert errors == []
+    finally:
+        page.close()
+
+
+def test_the_domain_mask_is_asked_in_a_browser(browser, tmp_path):
+    write_analysis_simulation(str(tmp_path / "base"), years=(2013, 2014), daily=False)
+    write_analysis_simulation(str(tmp_path / "fine"), years=(2013, 2014), daily=False, trend=1.0, lats=B_LATS, lons=B_LONS)
+    mask = write_mask(tmp_path / "mask.nc")
+    app = App(cwd=str(tmp_path))
+    url = app.start()
+    errors = []
+    try:
+        to_grids(app)
+        page = browser.new_page(viewport={"width": 1280, "height": 1000})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(url)
+        page.wait_for_selector("#view-simcompare-grids:not([hidden])")
+        # No to start, with the file's box hidden
+        assert page.is_checked("#scg-dm-no") and page.is_hidden("#scg-dm-detail")
+        assert page.inner_text("#scg-dm-question") == "Do you want to mask part of the domain?"
+        page.check("#scg-need-no")
+        assert page.is_enabled("#scg-continue")
+        # Yes needs a file that is a mask, which is drawn
+        page.check("#scg-dm-yes")
+        assert page.is_visible("#scg-dm-detail") and page.is_disabled("#scg-continue")
+        assert "single variable and a single time step" in page.inner_text("#scg-dm-detail")
+        page.fill("#scg-domain_mask_path", "nothing.nc")
+        page.wait_for_function("() => document.querySelector('#scm-domain_mask_path').innerText.includes('There is no file there.')")
+        assert page.is_disabled("#scg-continue")
+        page.fill("#scg-domain_mask_path", mask)
+        page.wait_for_function("() => document.querySelector('#scm-domain_mask_path').innerText.includes('12 of 20 cells will be matched up.')", timeout=60000)
+        page.wait_for_selector("#dm-map-scg.is-drawn", timeout=60000)
+        page.wait_for_function("() => !document.querySelector('#scg-continue').disabled", timeout=60000)
+        page.click("#scg-continue")
+        page.wait_for_selector("#view-analyze-options:not([hidden])")
+        assert app.sc_domain_mask == mask
+        assert not errors, errors
+    finally:
+        app.close()

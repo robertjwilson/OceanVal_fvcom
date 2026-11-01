@@ -590,7 +590,7 @@ class AnalyzeSteps:
     def _analyze_fvcom(self):
         """Whether the simulation Analyze is working on is raw FVCOM output.
         Called with the lock held."""
-        return self.action != SIMCOMPARE and bool((self.analyze_found or {}).get("fvcom"))
+        return bool((self.analyze_found or {}).get("fvcom"))
 
     def analyze_option(self, kind, form):
         """A pop-out's Confirm, with its boxes. The time series' also hold the

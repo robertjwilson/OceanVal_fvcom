@@ -198,3 +198,34 @@ def mesh_panel_plot(path, var, titles, ncol=4, limits=None, legend=None, colours
         if legend:
             bar.set_label(legend)
     return fig
+
+
+def mesh_sim_plot(maps, var, ncol=3, limits=None, legend=None, colours="viridis", grid_labels=False, size=None):
+    """Map var in the first time of each of maps, [(title, path)] of FVCOM files
+    (one for each simulation of a comparison, each on its own mesh), in a
+    panel of its own each, in ncol columns, on one colour scale (limits, or the
+    2nd to 98th percentile of all of them) under one colour bar, at the right.
+    Returns the figure."""
+    import matplotlib.pyplot as plt
+
+    found = []
+    for title, path in maps:
+        values, where = _values(path, var)
+        found.append((title, _mesh(path), values[0], where))
+    if limits is None:
+        limits = _robust(np.concatenate([values for _, _, values, _ in found])) or [0.0, 1.0]
+    ncol = max(1, min(ncol, len(found)))
+    nrow = int(np.ceil(len(found) / ncol))
+    fig = plt.figure(figsize=size or (3 * ncol + 1, 2.6 * nrow))
+    grid = fig.add_gridspec(nrow, ncol)
+    axes, drawn = [], None
+    for index, (title, mesh, values, where) in enumerate(found):
+        ax = _map_axes(fig, grid[index // ncol, index % ncol], mesh, grid_labels)
+        ax.set_title(title)
+        drawn = _draw(ax, mesh, values, where, limits, colours, not mesh.cartesian) or drawn
+        axes.append(ax)
+    if drawn is not None:
+        bar = fig.colorbar(drawn, ax=axes, extend=_extend(np.concatenate([values for _, _, values, _ in found]), limits), shrink=0.8)
+        if legend:
+            bar.set_label(legend)
+    return fig

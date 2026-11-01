@@ -322,14 +322,22 @@ def _panel_size(path, panels, ncol=None, bar_rows=0):
     for all the maps, or, with bar_rows, one below each of that many rows."""
     ncol = ncol or (4 if panels > 3 else panels)
     nrow = int(np.ceil(panels / ncol))
-    lon, lat = _valid_lon_lat(path)
-    lon = np.where(lon > 180, lon - 360, lon)
-    lon_span, lat_span = float(np.nanmax(lon) - np.nanmin(lon)), float(np.nanmax(lat) - np.nanmin(lat))
-    if lon_span > 340 and lat_span > 160:
-        aspect = 2.0
+    try:
+        lon, lat = _valid_lon_lat(path)
+    except StopIteration:
+        # a mesh in metres has no longitudes and latitudes: its x and y give its shape
+        with xr.open_dataset(path, decode_times=False) as ds:
+            x, y = np.asarray(ds["x"].values, dtype="float64"), np.asarray(ds["y"].values, dtype="float64")
+        y_span = float(np.nanmax(y) - np.nanmin(y))
+        aspect = (float(np.nanmax(x) - np.nanmin(x)) / y_span) if y_span > 0 else 1.5
     else:
-        mid_lat = 0.5 * float(np.nanmax(lat) + np.nanmin(lat))
-        aspect = lon_span * np.cos(np.radians(mid_lat)) / lat_span if lat_span > 0 else 1.5
+        lon = np.where(lon > 180, lon - 360, lon)
+        lon_span, lat_span = float(np.nanmax(lon) - np.nanmin(lon)), float(np.nanmax(lat) - np.nanmin(lat))
+        if lon_span > 340 and lat_span > 160:
+            aspect = 2.0
+        else:
+            mid_lat = 0.5 * float(np.nanmax(lat) + np.nanmin(lat))
+            aspect = lon_span * np.cos(np.radians(mid_lat)) / lat_span if lat_span > 0 else 1.5
     aspect = min(max(float(aspect), 0.6), 2.5)
     map_width = (PANEL_WIDTH - (0.4 if bar_rows else 1.6)) / ncol
     return [PANEL_WIDTH, round(nrow * (map_width / aspect + 0.55) + 0.9 * bar_rows + 0.3, 1)]

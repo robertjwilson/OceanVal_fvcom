@@ -1372,16 +1372,14 @@ def _first_level_is_surface(row, stream):
     return fast, why, fast and surface.small_cache_helps(stream["files"][0], names, nlevels)
 
 
-def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_index=None, refuse_fvcom=None):
+def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_index=None):
     """Find the output of each of rows (check_arguments's, with "as_missing")
     in the simulation in sim_dir, and say what it is: the stream, files, units,
     time resolution and the files and dates of each analysis. Checks that the
     output has what the rows ask of it. times_index is the path of the times of
     the files already read (see model_check.save_times_index), which are not
-    read again if their files are unchanged. refuse_fvcom, if given, is the
-    name of what refuses raw FVCOM output (as compare_simulations does), which
-    Analyze otherwise works out on its own mesh. Raises ValueError saying
-    everything that is wrong."""
+    read again if their files are unchanged. Raw FVCOM output is worked out on
+    its own mesh. Raises ValueError saying everything that is wrong."""
     from oceanval import time_stamps
     from oceanval.matchall import index_times
     from oceanval.model_check import files_in_years, load_times_index
@@ -1393,8 +1391,6 @@ def locate_rows(rows, sim_dir, n_dirs_down, exclude, require, time_shift, times_
         raise ValueError(
             f"No netCDF files were found {n_dirs_down} directories below {sim_dir}{filtered}."
         )
-    if refuse_fvcom and found[0].get("fvcom"):
-        raise ValueError(f"{refuse_fvcom} does not work with FVCOM output yet.")
     # raw FVCOM output, whose mesh CDO cannot read, by its files
     fvcom_files = {tuple(stream["files"]): bool(stream.get("fvcom")) for stream in found}
     # CDO looks at the files while their times are read below (not FVCOM's, whose mesh it cannot read)

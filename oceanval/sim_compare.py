@@ -34,7 +34,7 @@ from oceanval.quiet_nc import nc
 import numpy as np
 
 from oceanval import domain_mask as domain_mask_mod
-from oceanval import extent, sim_unify
+from oceanval import extent, netcdf_lock, sim_unify
 from oceanval.analysis import (
     BOTTOM,
     KINDS,
@@ -48,8 +48,10 @@ from oceanval.analysis import (
     check_arguments,
     check_area,
     check_as_missing,
+    check_mesh_area,
     first_step_of,
     locate_rows,
+    require_thickness,
     second_step_of,
     save_info,
     tell_analyses,
@@ -371,6 +373,70 @@ def _same_grid(rows_by_sim, sims):
         return None
 
 
+FVCOM_TEXT = (
+    "The simulations are raw FVCOM output on one mesh of triangles, which is read as it is: they were not regridded "
+    "or masked, and each was analysed on its own cells, which are the same in every simulation."
+)
+
+
+def fvcom_problems(rows_by_sim, names, unify, domain_mask, conversions):
+    """What stops raw FVCOM output being compared, as a list of sentences (empty if
+    nothing does, or if none of the output is FVCOM). It is compared on its own mesh:
+    only with other FVCOM output of the same mesh, never regridded (unify),
+    masked by a lon-lat file (domain_mask) or converted (unit_conversions)."""
+    from oceanval import fvcom_climatology
+
+    is_fvcom = {name: any(row.get("fvcom") for row in rows_by_sim[name]) for name in names}
+    if not any(is_fvcom.values()):
+        return []
+    problems = []
+    if not all(is_fvcom.values()):
+        yes = [name for name in names if is_fvcom[name]]
+        no = [name for name in names if not is_fvcom[name]]
+        problems.append(
+            "FVCOM output can be compared only with other FVCOM output, on its mesh: "
+            f"{', '.join(yes)} {'is' if len(yes) == 1 else 'are'} FVCOM and "
+            f"{', '.join(no)} {'is' if len(no) == 1 else 'are'} not."
+        )
+        return problems
+    if unify is not None:
+        problems.append(
+            "unify does not work with FVCOM output: a mesh cannot be regridded, and the simulations are "
+            "compared on their own cells (which must be the same mesh)."
+        )
+    if domain_mask is not None:
+        problems.append(
+            "domain_mask does not work with FVCOM output: a mesh cannot be masked by a lon-lat file, "
+            "and the simulations are compared on their own cells."
+        )
+    if conversions:
+        problems.append("unit_conversions do not work with FVCOM output: give the variable in the same units in every simulation.")
+    meshes = {}
+    for number, row in enumerate(rows_by_sim[names[0]]):
+        own = {name: rows_by_sim[name][number] for name in names}
+        parts = {name: fvcom_climatology.location(r["files"][0], r["parts"]) for name, r in own.items()}
+        if len(set(parts.values())) > 1:
+            shown = ", ".join(f"{name}: {where}" for name, where in parts.items())
+            problems.append(
+                f"{row['name']} must be on the same part of the FVCOM mesh in every simulation, "
+                f"and it is on the nodes of one and the elements of another ({shown})."
+            )
+            continue
+        for name, r in own.items():
+            path = r["files"][0]
+            if path not in meshes:
+                with netcdf_lock.LOCK:
+                    meshes[path] = fvcom_climatology.mesh_arrays(path)
+        first = meshes[own[names[0]]["files"][0]]
+        different = [name for name in names[1:] if not fvcom_climatology.same_mesh(first, meshes[own[name]["files"][0]])]
+        if different:
+            problems.append(
+                f"{row['name']}: the FVCOM mesh of {', '.join(different)} is not that of {names[0]}. FVCOM "
+                "output is compared on its own cells, so every simulation must be on the same mesh."
+            )
+    return problems
+
+
 def describe_mask(kept):
     """What the domain mask does, as a sentence for the report, or None for no mask."""
     if kept is None:
@@ -519,6 +585,8 @@ def compare_simulations(
                 seasonal,
                 transects,
                 map_changes,
+                # raw FVCOM output's is worked out from its mesh, so it is checked once the output is found
+                defer_thickness=True,
             )
         except ValueError as error:
             if "thickness" in str(error):
@@ -526,6 +594,8 @@ def compare_simulations(
             raise
         for row in rows:
             row["as_missing"] = sim["as_missing"]
+            # raw FVCOM output is read in this many processes (see oceanval.fvcom_climatology)
+            row["cores"] = int(cores)
         rows_by_sim[sim["name"]] = rows
     area = check_area(rows_by_sim[names[0]], subregions, lon_lim, lat_lim, stations)
 
@@ -540,10 +610,14 @@ def compare_simulations(
                 sim["require"],
                 sim["time_shift"],
                 sim["times_index"],
-                refuse_fvcom="compare_simulations",
             )
+            require_thickness([row for row in rows_by_sim[sim["name"]] if not row.get("fvcom")], sim["thickness"])
+            check_mesh_area(rows_by_sim[sim["name"]], area)
         except ValueError as error:
             problems.extend(f"{sim['name']}: {line}" for line in str(error).splitlines())
+    if not problems:
+        problems.extend(fvcom_problems(rows_by_sim, names, unify, domain_mask, conversions))
+    fvcom = not problems and any(row.get("fvcom") for row in rows_by_sim[names[0]])
     if not problems:
         for number, row in enumerate(rows_by_sim[names[0]]):
             # a simulation converted is in the first one's units once it is read (see analysis._model_data)
@@ -594,7 +668,8 @@ def compare_simulations(
         for sim in sims:
             for row in rows_by_sim[sim["name"]]:
                 row["domain_mask"] = mask_kept
-    same_grid = True if unify is not None or mask_kept is not None else _same_grid(rows_by_sim, sims)
+    # raw FVCOM output has been checked to be on one mesh
+    same_grid = True if unify is not None or mask_kept is not None or fvcom else _same_grid(rows_by_sim, sims)
 
     from oceanval import __version__, analysis_report, sim_report
 
@@ -617,6 +692,8 @@ def compare_simulations(
             "lat_lim": area["lat_lim"],
             "stations": {name: {"lon": lon, "lat": lat} for name, (lon, lat) in area["stations"].items()},
             "figure_code": bool(figure_code),
+            # whether any variable is raw FVCOM output, mapped on its own mesh
+            "fvcom": any(row.get("fvcom") for row in rows_by_sim[sim["name"]]),
             # each variable's, as it is worked out
             "variables": [],
         }
@@ -635,7 +712,7 @@ def compare_simulations(
             variable: {name: {"multiplier": m, "adder": a} for name, (m, a) in by_sim.items()}
             for variable, by_sim in conversions.items()
         },
-        "unify_text": sim_unify.describe(unify),
+        "unify_text": FVCOM_TEXT if fvcom else sim_unify.describe(unify),
         "domain_mask": None if mask_kept is None else os.path.relpath(mask_kept["path"], results_dir),
         "domain_mask_text": describe_mask(mask_kept),
         "same_grid": same_grid,
@@ -645,6 +722,7 @@ def compare_simulations(
         "lat_lim": area["lat_lim"],
         "stations": {name: {"lon": lon, "lat": lat} for name, (lon, lat) in area["stations"].items()},
         "figure_code": bool(figure_code),
+        "fvcom": fvcom,
         "variables": variables_info,
     }
 

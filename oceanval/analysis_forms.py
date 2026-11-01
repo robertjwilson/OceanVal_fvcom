@@ -233,6 +233,8 @@ def check_rows(rows, found, time_res_of=analysis.stream_time_res):
                     "files": list(stream["files"]),
                     "time_res": res,
                     "streams": len(holding),
+                    # raw FVCOM output, worked out on its own mesh
+                    "fvcom": bool(stream.get("fvcom")),
                 },
                 **analysis.describe_variable(model_variable, stream),
             )

@@ -40,6 +40,7 @@ import xarray as xr
 from oceanval import domain_mask, sim_unify, transects
 from oceanval.analysis import SURFACE, Z_LEVEL, _say, _time_dim, _year, monthly_means_of, thickness_data
 from oceanval.analysis_series import EARTH_KM, _grid, _spacing, months_per_year
+from oceanval.quiet_nc import nc
 
 CLIMATOLOGY = "climatology"
 VERTICAL = "vertical"
@@ -549,8 +550,6 @@ def _strip_depths(path, line, steps, ends):
     """The depth of each cell along a transect of raw FVCOM output, by depth
     then position, from the thickness of its layers on the line's strip (see
     oceanval.fvcom_transects)."""
-    import nctoolkit as nc
-
     from oceanval.fvcom_transects import THICKNESS
 
     ds = nc.open_data(path, checks=False)
@@ -644,8 +643,6 @@ def _work_out(row, results_dir, time_shift, thickness, thickness_for, strip_fold
             if not any(line[option] for option in (VERTICAL_OPTIONS if vertical else SURFACE_OPTIONS)):
                 continue
             if fvcom:
-                import nctoolkit as nc
-
                 path, times, thickness_path = strips[(number, vertical)]
                 ds = nc.open_data(path, checks=False)
             else:

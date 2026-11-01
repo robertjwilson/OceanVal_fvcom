@@ -35,6 +35,11 @@
   tbody tr { transition: background-color 0.15s; }
   tbody tr:hover { background: var(--row-hover); }
   tbody tr.is-empty { background: var(--empty-row); }
+  /* a row with a dataset ticked on this page: tinted, with a teal edge, so it is plain at a glance */
+  tbody tr.is-selected { background: var(--teal-50); }
+  tbody tr.is-selected:hover { background: var(--teal-100); }
+  tbody tr.is-selected td:first-child { box-shadow: inset 4px 0 0 var(--teal-500); }
+  tbody tr.is-selected .chip.is-on, tbody tr.is-selected .chip.is-own { background: var(--bg); }
 
   .obs__title { display: block; padding-top: 8px; font-weight: 600; line-height: 1.25; }
   .obs__key { display: block; margin-top: 3px; color: var(--muted-light); font-size: 12px; }
@@ -61,7 +66,7 @@
   .field__msg { display: flex; gap: 6px; align-items: flex-start; margin: 6px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.4; }
   .field__msg:empty { display: none; }
   .is-empty .field__msg { color: var(--coral-dark); }
-  .is-invalid .field__msg { color: var(--red); }
+  .is-invalid .field__msg { color: var(--ink); }
 
   /* datasets */
   .chips { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
@@ -92,6 +97,22 @@
     font-weight: 600;
     letter-spacing: 0.05em;
   }
+  .explainer { margin: 0 0 18px; padding: 14px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); font-size: 13.5px; }
+  .explainer__title { margin: 0 0 8px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; }
+  .explainer dl { display: grid; grid-template-columns: max-content 1fr max-content 1fr; gap: 8px 14px; margin: 0; align-items: baseline; }
+  @media (max-width: 640px) { .explainer dl { grid-template-columns: max-content 1fr; } }
+  .explainer dt { margin: 0; }
+  .explainer dd { margin: 0; color: var(--ink-soft); overflow-wrap: anywhere; }
+  /* a hover note with no browser delay */
+  .chip__region.has-tip { position: relative; cursor: help; }
+  .chip__region.has-tip::after {
+    content: attr(data-tip);
+    position: absolute; left: 0; top: calc(100% + 6px); z-index: 20;
+    padding: 5px 9px; border-radius: 6px; background: var(--ink); color: var(--bg);
+    font-size: 12px; font-weight: 500; letter-spacing: 0; white-space: nowrap;
+    opacity: 0; pointer-events: none;
+  }
+  .chip__region.has-tip:hover::after, .chip__region.has-tip:focus::after { opacity: 1; }
   .chip__region.is-domain { background: var(--accent-soft); color: var(--teal-700); }
   /* the recipes the user registered */
   .chip__region.is-yours { background: rgba(215, 107, 69, 0.14); color: var(--coral-dark); }
@@ -118,24 +139,35 @@
     padding: 20px 22px 24px;
   }
   .settings--more { margin-top: 30px; }
+  .settings__note { margin: 0; padding: 0 22px 20px; color: var(--muted); font-size: 13px; }
+  .page > .settings { margin-bottom: 32px; }
+  /* the climatology years' question stays on one line, so its column is as wide as that needs */
+  #group-climate legend { white-space: nowrap; color: var(--ink); font-weight: 800; }
+  #group-climate .group__intro { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+  @media (min-width: 1100px) {
+    #settings-gridded { grid-template-columns: max-content minmax(0, 1fr) minmax(0, 1fr); }
+  }
+  /* the point settings are stacked: the years question, then how observations are matched */
+  #settings-point { grid-template-columns: minmax(0, 1fr); row-gap: 26px; }
+  /* narrower, the columns are shared out evenly, so the questions wrap rather than run into the next column */
+  @media (max-width: 1099px) {
+    #group-climate legend { white-space: normal; }
+  }
   .settings--more .settings__grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .settings__column:empty { display: none; }
   .settings__column { display: grid; align-content: start; gap: 26px; min-width: 0; }
   .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
-  .lede-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
-  .lede-row .lede { margin: 0; }
-  .btn--clear { flex: none; height: 44px; margin-bottom: -3px; padding: 0 20px; border: 1.5px solid var(--line-strong); background: var(--bg-alt); color: var(--ink-soft); font-size: 15px; white-space: nowrap; }
-  .btn--clear:hover:not(:disabled) { border-color: var(--btn-disabled); background: var(--teal-100); }
-  .btn--clear:disabled { border-color: var(--line); background: var(--bg); color: var(--muted-light); }
+  .th-with-button { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .btn--th { flex: none; height: 32px; padding: 0 14px; font-size: 13px; text-transform: none; letter-spacing: 0; white-space: nowrap; }
   .settings__ticks { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px 24px; padding: 0 22px 20px; }
-  .g-label.is-required { color: var(--red); font-weight: 700; }
+  .g-label.is-required { font-weight: 500; }
   .year-required { margin-left: 6px; color: var(--red); font-size: 10.5px; font-weight: 700; text-transform: uppercase; }
   /* a box's own hint, between it and the next box */
   .group__msg + .g-row { margin-top: 10px; }
   .group__line.is-ersem { color: var(--ersem); font-weight: 600; }
   .s-input.is-ersem, .s-select.is-ersem { border-color: var(--ersem-line); background-color: var(--ersem-bg); color: var(--ersem); font-weight: 600; }
   /* what the oceanval app's demo filled in is red and bold, until it is typed over */
-  .s-input.is-oceanval, .s-select.is-oceanval, .lede .oceanval-change, .field__msg .oceanval-change { color: var(--red); font-weight: 700; }
+  .s-input.is-oceanval, .s-select.is-oceanval, .lede .oceanval-change, .field__msg .oceanval-change { color: var(--ink); font-weight: 700; }
   .cores-row { display: grid; grid-template-columns: minmax(0, 1fr) 84px; align-items: center; gap: 10px; }
   .cores-row .g-label { margin: 0; }
   .cores-row.is-stacked { grid-template-columns: minmax(0, 1fr); gap: 6px; }
@@ -147,7 +179,7 @@
   .opts__row { display: grid; grid-template-columns: 50px minmax(0, 1fr); align-items: center; gap: 6px; }
   .opts__label { color: var(--muted); font-size: 11.5px; font-weight: 500; }
   .opts__row.is-required { grid-template-columns: 64px minmax(0, 1fr); }
-  .opts__row.is-required .opts__label { color: var(--red); font-weight: 700; }
+  .opts__row.is-required .opts__label { font-weight: 500; }
   .opts__row.is-required .opts__label::after { content: "Required"; display: block; color: var(--red); font-size: 9px; font-weight: 700; text-transform: uppercase; }
   .opts__help { position: relative; display: inline-flex; margin-left: 3px; vertical-align: middle; }
   .opts__help > summary { display: grid; place-items: center; width: 16px; height: 16px; border: 1px solid var(--teal-600); border-radius: 50%; color: var(--teal-700); font-size: 11px; font-weight: 700; line-height: 1; list-style: none; cursor: pointer; }
@@ -175,9 +207,11 @@
   .s-input.is-small, .s-select.is-small { padding-top: 4px; padding-bottom: 4px; font-size: 12.5px; }
   .s-select.is-small { padding-right: 22px; background-position: right 7px center; }
   .opts__vertical { font-size: 12.5px; }
-  .opts__msg { margin: 0; color: var(--red); font-size: 12px; line-height: 1.35; }
+  .opts__msg { margin: 0; color: var(--ink); font-size: 12px; line-height: 1.35; }
+  .opts__msg.is-warn { color: var(--coral-dark); }
+  .s-input.is-outside { border-color: var(--coral-dark); }
   .opts__msg:empty { display: none; }
-  .fix-settings { margin: 0; color: var(--red); font-size: 12.5px; font-weight: 700; text-align: center; }
+  .fix-settings { margin: 0; color: var(--ink); font-size: 12.5px; font-weight: 700; text-align: center; }
   .write-action { display: grid; gap: 4px; }
 
 
@@ -188,8 +222,6 @@
     thead th, tbody td { padding-left: 14px; padding-right: 14px; }
   }
   @media (max-width: 760px) {
-    .lede-row { flex-direction: column; align-items: flex-start; gap: 14px; }
-    .btn--clear { margin-bottom: 0; }
     table, tbody, tr, td { display: block; width: 100%; }
     thead, colgroup { display: none; }
     tbody tr { padding: 14px 16px 10px; border-bottom: 1px solid var(--line-strong); }
@@ -227,14 +259,22 @@
 <main class="wrap">
   <!-- page 1 of 2: the gridded datasets -->
   <section class="page" id="page-gridded" aria-labelledby="page-title">
+    <div class="section-head">
+      <h2 class="section-title">Select gridded datasets to compare with observations</h2>
+    </div>
+    <p class="lede">Choose gridded climatologies and time series from the table below. In each case, select a suitable time period to use for any model-observation comparison. If applicable, ignore any model spinup period.</p>
+    <aside class="explainer" id="explainer-gridded" aria-labelledby="explainer-gridded-title"></aside>
+    <p class="lede" id="lede-gridded"></p>
     <section class="settings card" aria-label="Settings for the gridded datasets">
       <div class="settings__grid" id="settings-gridded">
         <div class="settings__column">
           <fieldset class="group" id="group-climate">
-            <legend>What simulation years do you want to use for climatologies?</legend>
+            <legend>What simulation years do you want to use to compare with climatologies?</legend>
+            <p class="group__intro">Ideally, select a suitable long-term period covering 10 or more years to reduce the influence of short-term variability</p>
+            <p class="group__intro">This will apply to all climatologies, but can be overridden individually.</p>
             <div class="g-row pair">
-              <label><span class="g-label">First year</span><input class="s-input is-num" id="s-clim_start" name="climatology-start-year" aria-label="First year for climatologies" inputmode="numeric" spellcheck="false" autocomplete="chrome-off" autocapitalize="off"></label>
-              <label><span class="g-label">Last year</span><input class="s-input is-num" id="s-clim_end" name="climatology-end-year" aria-label="Last year for climatologies" inputmode="numeric" spellcheck="false" autocomplete="chrome-off" autocapitalize="off"></label>
+              <label><span class="g-label">First year</span><input class="s-input is-num" id="s-clim_start" name="climatology-start-year" aria-label="First year for climatologies" inputmode="numeric" spellcheck="false" autocomplete="off" autocapitalize="off"></label>
+              <label><span class="g-label">Last year</span><input class="s-input is-num" id="s-clim_end" name="climatology-end-year" aria-label="Last year for climatologies" inputmode="numeric" spellcheck="false" autocomplete="off" autocapitalize="off"></label>
             </div>
             <p class="group__msg" id="g-output-years"></p>
             <p class="group__msg" id="g-climate"></p>
@@ -243,12 +283,12 @@
         <div class="settings__column">
           <fieldset class="group" id="group-fvcom" hidden>
             <legend>How do you want the FVCOM output regridded?</legend>
-            <label class="g-row"><span class="g-label">Lon-lat resolution for point data (degrees)</span><input class="s-input is-num" id="s-fvcom_res" name="fvcom-resolution" inputmode="decimal" spellcheck="false" autocomplete="chrome-off" autocapitalize="off"></label>
+            <label class="g-row"><span class="g-label">Lon-lat resolution for point data (degrees)</span><input class="s-input is-num" id="s-fvcom_res" name="fvcom-resolution" inputmode="decimal" spellcheck="false" autocomplete="off" autocapitalize="off"></label>
             <div class="g-row pair">
-              <label><span class="g-label">Minimum depth (m)</span><input class="s-input is-num" id="s-fvcom_min_depth" name="fvcom-minimum-depth" inputmode="decimal" spellcheck="false" autocomplete="chrome-off" autocapitalize="off"></label>
-              <label><span class="g-label">Maximum depth (m)</span><input class="s-input is-num" id="s-fvcom_max_depth" name="fvcom-maximum-depth" inputmode="decimal" spellcheck="false" autocomplete="chrome-off" autocapitalize="off"></label>
+              <label><span class="g-label">Minimum depth (m)</span><input class="s-input is-num" id="s-fvcom_min_depth" name="fvcom-minimum-depth" inputmode="decimal" spellcheck="false" autocomplete="off" autocapitalize="off"></label>
+              <label><span class="g-label">Maximum depth (m)</span><input class="s-input is-num" id="s-fvcom_max_depth" name="fvcom-maximum-depth" inputmode="decimal" spellcheck="false" autocomplete="off" autocapitalize="off"></label>
             </div>
-            <label class="g-row"><span class="g-label">Vertical spacing (m)</span><input class="s-input is-num" id="s-fvcom_dz" name="fvcom-vertical-spacing" inputmode="decimal" spellcheck="false" autocomplete="chrome-off" autocapitalize="off"></label>
+            <label class="g-row"><span class="g-label">Vertical spacing (m)</span><input class="s-input is-num" id="s-fvcom_dz" name="fvcom-vertical-spacing" inputmode="decimal" spellcheck="false" autocomplete="off" autocapitalize="off"></label>
             <p class="group__msg" id="g-fvcom"></p>
           </fieldset>
         </div>
@@ -257,8 +297,7 @@
           <fieldset class="group" id="group-thickness">
             <legend>Model data info</legend>
             <div id="row-thickness">
-            <label class="g-row"><span class="g-label">Is the simulation z-level or is thickness supplied?</span><input class="s-input is-mono" id="s-thickness" list="thickness-options" spellcheck="false" autocomplete="off" autocapitalize="off"></label>
-            <div id="thickness-picker"></div>
+            <label class="g-row"><span class="g-label">Is the simulation z-level or is thickness supplied?</span><input class="s-input is-mono" id="s-thickness" spellcheck="false" autocomplete="off" autocapitalize="off"></label>
             <p class="group__msg" id="g-thickness"></p>
             </div>
           </fieldset>
@@ -266,13 +305,6 @@
       </div>
     </section>
 
-    <div class="section-head">
-      <h2 class="section-title">What gridded datasets do you want to matchup?</h2>
-    </div>
-    <div class="lede-row">
-      <p class="lede" id="lede-gridded"></p>
-      <button type="button" class="btn btn--ghost btn--clear" id="clear-gridded">Clear all selections</button>
-    </div>
     <div class="card">
       <table>
         <colgroup><col class="c-obs"><col class="c-model"><col class="c-gridded"></colgroup>
@@ -280,7 +312,7 @@
           <tr>
             <th scope="col">Environmental variable</th>
             <th scope="col">What is the simulation variable name?</th>
-            <th scope="col">What gridded datasets do you want?</th>
+            <th scope="col"><span class="th-with-button">What gridded datasets do you want?<button type="button" class="btn btn--primary btn--th" id="clear-gridded">Deselect all</button></span></th>
           </tr>
         </thead>
         <tbody id="rows-gridded"></tbody>
@@ -290,11 +322,18 @@
 
   <!-- page 2 of 2: the point datasets -->
   <section class="page" id="page-point" aria-labelledby="page-title" hidden>
+    <div class="section-head">
+      <h2 class="section-title">Select point datasets to compare with the simulation</h2>
+    </div>
+    <p class="lede">Choose point datasets from the table below. In each case, select a suitable time period to use for any model-observation comparison. If applicable, ignore any model spinup period.</p>
+    <aside class="explainer" id="explainer-point" aria-labelledby="explainer-point-title"></aside>
+    <p class="lede" id="lede-point"></p>
     <section class="settings card" aria-label="Settings for the point datasets">
       <div class="settings__grid" id="settings-point">
         <div class="settings__column">
           <fieldset class="group" id="group-years">
-            <legend>What years do you want to validate?</legend>
+            <legend>Settings for all point matchups</legend>
+            <span class="g-label" id="s-point_years-question">What simulation years do you want to compare with point observations?</span>
             <div class="g-row pair">
               <label><span class="g-label" id="s-point_start-label">First <span class="year-required" id="s-point_start-required" hidden>Required</span></span><input class="s-input is-num" id="s-point_start" inputmode="numeric" spellcheck="false" autocomplete="off" autocapitalize="off"></label>
               <label><span class="g-label" id="s-point_end-label">Last <span class="year-required" id="s-point_end-required" hidden>Required</span></span><input class="s-input is-num" id="s-point_end" inputmode="numeric" spellcheck="false" autocomplete="off" autocapitalize="off"></label>
@@ -317,11 +356,11 @@
                       <dt>Year, month</dt>
                       <dd>Each observation is compared with the simulation's mean for that month of that year, and the day is ignored. Use this for monthly simulation output.</dd>
                       <dt>Month, day</dt>
-                      <dd>Climatological: the year is ignored. Observations from any year are compared with the simulation's average for the same day of the year.</dd>
+                      <dd>Climatological: the year is ignored. Observations from any year are compared with the simulation's average for the same day of the year. Consider this if you have a short-term simulation, and want to compare it with observations over a longer time period.</dd>
                       <dt>Month</dt>
-                      <dd>Climatological, by month. Observations from any year are compared with the simulation's average for that calendar month.</dd>
+                      <dd>Climatological, by month. Observations from any year are compared with the simulation's average for that calendar month. Consider this if you have a short-term simulation, and want to compare it with observations over a longer time period.</dd>
                     </dl>
-                    <p>This is filled in for each point dataset below, where it can be changed.</p>
+                    <p>This will apply to all point datasets, but can be overridden individually.</p>
                   </div>
                 </details>
               </div>
@@ -332,15 +371,9 @@
         </div>
         <div class="settings__column" id="thickness-point"></div>
       </div>
+      <p class="settings__note">These settings will apply to all point datasets, but can be overridden individually.</p>
     </section>
 
-    <div class="section-head">
-      <h2 class="section-title">What point datasets do you want to matchup?</h2>
-    </div>
-    <div class="lede-row">
-      <p class="lede" id="lede-point"></p>
-      <button type="button" class="btn btn--ghost btn--clear" id="clear-point">Clear all selections</button>
-    </div>
     <div class="card">
       <table>
         <colgroup><col class="c-obs"><col class="c-model"><col class="c-point-wide"><col class="c-chosen"></colgroup>
@@ -348,7 +381,7 @@
           <tr>
             <th scope="col">Environmental variable</th>
             <th scope="col">What is the simulation variable name?</th>
-            <th scope="col">What point datasets do you want?</th>
+            <th scope="col"><span class="th-with-button">What point datasets do you want?<button type="button" class="btn btn--primary btn--th" id="clear-point">Deselect all</button></span></th>
             <th scope="col">Gridded data selected</th>
           </tr>
         </thead>
@@ -472,7 +505,6 @@
 </div>
 
 <div class="toast" id="toast" role="status" hidden></div>
-<datalist id="thickness-options"></datalist>
 
 <script type="application/json" id="state">__OCEANVAL_STATE__</script>
 <script>
@@ -503,17 +535,16 @@
   // times (see oceanval.output_years): the arrow of each year box lists the
   // years between, and any year can still be typed, in case those are wrong
   const outputYears = Array.isArray(context.output_years) ? context.output_years : null;
+  const outputYearList = outputYears
+    ? Array.from({ length: outputYears[1] - outputYears[0] + 1 }, (_, number) => outputYears[0] + number)
+    : null;
   if (outputYears) {
-    const years = Array.from({ length: outputYears[1] - outputYears[0] + 1 }, (_, number) => outputYears[0] + number);
     for (const name of ["point_start", "point_end", "clim_start", "clim_end"]) {
       const box = $(`s-${name}`);
       box.classList.add("is-year");
       box.placeholder = String(outputYears[name.endsWith("start") ? 0 : 1]);
-      withChoices(box, years);
+      withChoices(box, outputYearList);
     }
-    $("g-output-years").textContent = outputYears[0] === outputYears[1]
-      ? `The simulation's output is all in ${outputYears[0]}, from the times in its files.`
-      : `The simulation's output runs from ${outputYears[0]} to ${outputYears[1]}, from the times in its files.`;
   }
 
   // ---- the two pages: the gridded datasets, then the point datasets ----
@@ -529,26 +560,13 @@
   }
 
   function lede(kind) {
-    const parts = kind === "gridded"
-      ? ["Check the simulation variable matched to each observational variable, and tick the gridded datasets " +
-        "to validate it against. Each row starts with the datasets OceanVal would use for the ",
-        el("strong", { text: context.region }),
-        " domain ticked. Each dataset ticked needs the years to validate: climatologies are given the years " +
-        "for climatologies above. Anything left unticked is still written to the script, commented out, " +
-        "so it can be switched on later."]
-      : ["Tick the point datasets to validate each variable against. Each one ticked is given the years and " +
-        "the way observations are matched from the boxes above, and any of them can be changed for one dataset. " +
-        "The last column lists the gridded datasets chosen on the page before. Anything left unticked is still " +
-        "written to the script, commented out, so it can be switched on later."];
+    // the pages have no introduction of their own here, only these notes
+    const parts = [];
     // the user's own data, which the script registers whatever is ticked
     if (state.rows.some((row) => row.own.some((entry) => entry.kind === kind))) {
       parts.push(" Your own data is always matched up, so is ticked in its row, marked ",
         el("strong", { text: "Your data" }), ", with options like the other datasets'",
         app ? "; to change anything else about it, or remove it, go back to the step where it was added." : ".");
-    }
-    if (app && app.prefilled && app.prefilled.length) {
-      parts.push(" For the demo, OceanVal has filled in the years, ",
-        el("strong", { class: "oceanval-change", text: "in red and bold" }), ".");
     }
     if (restore && restore.retick) {
       // the rows edited before, whose datasets are ticked for the domain chosen since
@@ -557,7 +575,33 @@
     }
     return parts;
   }
-  for (const kind of KINDS) $(`lede-${kind}`).append(...lede(kind));
+  // the explainer box of the gridded page: what the tags mean, and where each dataset comes from
+  function buildExplainer(kind) {
+    const tag = (text, title) => el("span", { class: "chip__region" + (title ? " has-tip" : ""), text, ...(title ? { "data-tip": title, tabindex: "0" } : {}) });
+    const source = (name) => [el("dt", {}, el("span", { class: "chip__name", text: name }), " etc."), el("dd", { text: "The name of the data source" })];
+    // the Vertical tick box as a dataset's row shows it, but not changeable
+    const vertical = [el("dt", {}, el("span", { class: "tick-label" },
+      el("input", { type: "checkbox", class: "tick", disabled: true, tabindex: "-1", "aria-hidden": "true" }), "Vertical")),
+      el("dd", { text: "Variables with this box have 3D data. Tick if you want 3D validation" })];
+    const entries = kind === "gridded"
+      ? [el("dt", {}, tag("Global"), " ", tag("NWES", "Northwest European shelf")), el("dd", { text: "The domain a dataset covers." }),
+        el("dt", {}, tag("clim")), el("dd", { text: "A climatology: observations averaged over many years." }),
+        el("dt", {}, tag("TS")), el("dd", { text: "A gridded dataset covering multiple years." }),
+        ...vertical, ...source("GLODAP")]
+      // point datasets have no clim or TS tag
+      : [el("dt", {}, tag("NWES", "Northwest European shelf")), el("dd", { text: "The domain a dataset covers." }),
+        ...vertical, ...source("ICES")];
+    $(`explainer-${kind}`).append(el("h2", { class: "explainer__title", id: `explainer-${kind}-title`, text: "Explainer" }),
+      el("dl", {}, ...entries));
+  }
+  for (const kind of KINDS) buildExplainer(kind);
+  for (const kind of KINDS) {
+    $(`lede-${kind}`).append(...lede(kind));
+    // a note that starts a line has no space before it
+    const first = $(`lede-${kind}`).firstChild;
+    if (first && first.nodeType === 3) first.textContent = first.textContent.trimStart();
+    $(`lede-${kind}`).hidden = !$(`lede-${kind}`).childNodes.length;
+  }
   const hasOwnData = state.rows.some((row) => row.own.length);
 
   // ---- the settings above each page's table ----
@@ -568,8 +612,6 @@
     if (!String(form[name] || "").trim()) form[name] = value;
   }
   const initialForm = { ...form };
-  // what the oceanval app's demo filled in, which stays marked while it is unchanged
-  const DEMO_VALUES = Object.fromEntries(((app && app.prefilled) || []).map((name) => [name, String(form[name])]));
   // what create_recipes found wrong with the last Write, until the box changes
   const serverErrors = {};
   const GROUPS = {
@@ -609,17 +651,12 @@
   const BOOLEANS = new Set(["overwrite", "ask", "pdf", "word"]);
   const timeRes = new Map(state.time_res_options.map((option) => [option.value, option]));
   const field = (name) => $(`s-${name}`);
-  // the pop-out of variables under the thickness box, whose ticks follow the box
-  let thicknessPicker = null;
-
   field("point_time_res").append(...state.time_res_options.map((option) =>
     el("option", { value: option.value, text: option.label })));
   // 1 to the machine's cores; a kept value beyond them is still shown, with its error
   const coreChoices = Array.from({ length: state.cpu_count || 0 }, (_, number) => String(number + 1));
   if (String(form.cores).trim() && !coreChoices.includes(String(form.cores))) coreChoices.push(String(form.cores));
   field("cores").append(...coreChoices.map((number) => el("option", { value: number, text: number })));
-  $("thickness-options").append(
-    el("option", { value: "z_level" }), ...state.available.map((name) => el("option", { value: name })));
   if (context.fvcom) {
     // matchup regrids FVCOM output onto z-levels, over the mesh's extent
     field("thickness").disabled = true;
@@ -628,19 +665,9 @@
       field(name).placeholder = name.endsWith("min") ? "mesh min" : "mesh max";
     }
   } else {
-    // a variable of the model's can be picked as the thickness, one only
-    thicknessPicker = variablesPicker({
-      get: () => String(form.thickness),
-      set: (value) => {
-        form.thickness = value;
-        setControl("thickness");
-        delete serverErrors.thickness;
-        summarise();
-      },
-      multi: false,
-      className: "vars--thickness",
-    });
-    if (thicknessPicker) $("thickness-picker").append(thicknessPicker.details);
+    // z_level and the model's variables are listed as the thickness is typed in, one only (a pick is an input event)
+    OceanValGUI.variableBox(field("thickness"), {
+      available: ["z_level", ...state.available.filter((name) => name !== "z_level")], longNames: state.long_names || {}, multi: false });
   }
 
   function setControl(name) {
@@ -651,10 +678,8 @@
       "is-ersem",
       ERSEM_DEFAULTS[name] !== undefined && String(form[name]) === ERSEM_DEFAULTS[name],
     );
-    control.classList.toggle("is-oceanval", DEMO_VALUES[name] !== undefined && String(form[name]) === DEMO_VALUES[name]);
     // a long path can be wider than its box
     if (control.tagName === "INPUT" && !BOOLEANS.has(name)) control.title = control.value;
-    if (name === "thickness" && thicknessPicker) thicknessPicker.sync();
   }
 
   for (const name of FIELDS) {
@@ -683,33 +708,51 @@
   const knownYears = () => yearPair(form.point_start, form.point_end);
   // the years climatologies average the simulation over, as typed
   const climYears = () => yearPair(form.clim_start, form.clim_end);
+  // how years sit against the output found in the simulation's files: null
+  // when inside (or not known), a warning when partly outside, an error when
+  // none of them is in it, as nothing would be matched up
+  function outsideOutput(first, last) {
+    const years = yearPair(first, last);
+    if (!outputYears || !years) return null;
+    const [low, high] = outputYears;
+    const found = low === high ? `all in ${low}` : `from ${low} to ${high}`;
+    const range = years[0] === years[1] ? `${years[0]}` : `${years[0]}–${years[1]}`;
+    if (years[1] < low || years[0] > high) {
+      return { level: "error", text: `${range} is not in the simulation's output, which is ${found}, so nothing would be matched up.` };
+    }
+    if (years[0] < low || years[1] > high) {
+      return { level: "warn", text: `These go beyond the ${low}–${high} found in the simulation's files. Check they are right: years with no output are not matched up.` };
+    }
+    return null;
+  }
   // the WOA23 decade the years sit inside, if they sit inside one
   const woa23Period = (years) =>
     state.woa23_periods.find(([first, last]) => years[0] >= first && years[1] <= last);
   const WOA23_DECADES = state.woa23_periods.map(([first, last]) => `${first}–${last}`).join(", ");
   // the years every ticked dataset starts with where nothing above gives
-  // them: those create_recipes was given, or the demo's, in red and bold as
-  // OceanVal filled them in. In the app, none: each dataset's are typed
+  // them: those create_recipes was given, in bold as OceanVal filled
+  // them in. In the app, none: each dataset's are typed
   const initialYears = app
-    ? (Array.isArray(app.initial_years) ? app.initial_years.map(String) : null)
+    ? null
     : (yearPair(context.start, context.end) ? [String(context.start), String(context.end)] : null);
 
   // matchup needs a thickness to validate anything through the water column
   // the user's own data as the window has it, or else as the app says it is
   const ownVertical = () => ownChipList.length
     ? ownChipList.some(({ chip }) => chip.dataset.opts.vertical) : Boolean(app && app.own_vertical);
-  const ownPoint = () => ownChipList.length
-    ? ownChipList.some(({ chip }) => chip.dataset.kind === "point") : Boolean(app && app.own_point);
   const verticalTicked = (kind) =>
     ownChipList.some(({ chip }) => chip.dataset.kind === kind && chip.dataset.opts.vertical)
     || rows.some((row) => row.status === "ok" && row.datasets.some(
       (dataset) => dataset.kind === kind && dataset.checked && dataset.opts.vertical));
   const needsThickness = () => !context.fvcom && (ownVertical() || KINDS.some(verticalTicked));
-  // the point time resolution and years are only for point datasets: ticked ones, or the user's own
-  const needsPointTimeRes = () => ownPoint()
+  // the years above are needed only by a point dataset without a first and last of its own
+  const lacksOwnYears = (dataset) => !dataset.typed.start || !dataset.typed.end;
+  const needsPointYears = () => (ownChipList.length
+    ? ownChipList.some(({ chip }) => chip.dataset.kind === "point" && lacksOwnYears(chip.dataset))
+    : Boolean(app && app.own_point))
     || rows.some((row) => row.status === "ok" && row.datasets.some(
-      (dataset) => dataset.checked && dataset.kind === "point"));
-  const THICKNESS_NEEDED = "A dataset is set to Vertical, so a thickness is needed: z_level, a cell thickness variable or a file.";
+      (dataset) => dataset.checked && dataset.kind === "point" && lacksOwnYears(dataset)));
+  const THICKNESS_NEEDED ="A dataset is set to Vertical, so a thickness is needed: z_level, a cell thickness variable or a file.";
 
   // the thickness is asked on the point datasets' page if only they are set
   // to Vertical, else on the page of the gridded datasets. Returns that page
@@ -746,8 +789,8 @@
   // the same rules create_recipes applies, so most problems show as you type
   function settingErrors() {
     const errors = {};
-    // needed for the point datasets ticked, which are given them
-    const required = needsPointTimeRes();
+    // needed by the point datasets ticked that have no years of their own
+    const required = needsPointYears();
     for (const name of ["point_start", "point_end"]) {
       const text = String(form[name]).trim();
       if (text && !isInteger(text)) errors[name] = "Years must be whole numbers.";
@@ -760,7 +803,9 @@
         && +form.point_end < +form.point_start) {
       errors.point_end = "Last year must not be before the first year.";
     }
-    if (!required && !matchupYears() && !errors.point_start) {
+    const pointOutside = !errors.point_start && !errors.point_end ? outsideOutput(form.point_start, form.point_end) : null;
+    if (pointOutside && pointOutside.level === "error") errors.point_end = pointOutside.text;
+    if (!required && tickedDatasets().length && !matchupYears() && !errors.point_start) {
       errors.point_start = "Give the years to validate, here or for a dataset.";
     }
 
@@ -774,6 +819,8 @@
     } else if (clim.length === 2 && !errors.clim_start && !errors.clim_end && +form.clim_end < +form.clim_start) {
       errors.clim_end = "Last year must not be before the first year.";
     }
+    const climOutside = clim.length === 2 && !errors.clim_start && !errors.clim_end ? outsideOutput(form.clim_start, form.clim_end) : null;
+    if (climOutside && climOutside.level === "error") errors.clim_end = climOutside.text;
 
     if (context.fvcom) {
       const numbers = {};
@@ -854,22 +901,17 @@
   function groupHints(group) {
     switch (group) {
       case "years": {
-        const hints = [{ text: "Filled in for each point dataset below, where they can be changed." }];
+        const hints = [];
         // the years found can be wrong, so others can be given: they are only warned about
-        const years = knownYears();
-        if (outputYears && years && (years[0] < outputYears[0] || years[1] > outputYears[1])) {
-          hints.push({ text: `These go beyond the ${outputYears[0]}–${outputYears[1]} found in the simulation's files. Check they are right: years with no output are not matched up.`, warn: true });
-        }
+        const outside = outsideOutput(form.point_start, form.point_end);
+        if (outside) hints.push({ text: outside.text, warn: true });
         return hints;
       }
       case "climate": {
-        const used = rows.filter((row) => row.status === "ok").flatMap((row) => row.datasets
-          .filter((dataset) => dataset.climatology && dataset.checked)
-          .map((dataset) => `${dataset.label} ${row.title.toLowerCase()}`));
-        const hints = [{ text: used.length
-          ? `Filled in for ${used.join(", ")} below, where they can be changed.`
-          : "Filled in for each climatology ticked below, where they can be changed." }];
+        const hints = [];
         const years = climYears();
+        const climOutside = outsideOutput(form.clim_start, form.clim_end);
+        if (climOutside) hints.push({ text: climOutside.text, warn: true });
         const decadal = decadalDatasets().map(({ row }) => row.title.toLowerCase());
         if (decadal.length && years && !woa23Period(years)) {
           hints.push({ text: `WOA23 ${decadal.join(" and ")} ${decadal.length === 1 ? "is" : "are"} published per decade, so give `
@@ -897,10 +939,8 @@
       }
       case "missing":
         return [{ text: "Treat as missing: one value, or everything in a range." }];
-      case "point": {
-        const option = timeRes.get(form.point_time_res);
-        return [{ text: `${option ? option.hint + ". " : ""}Filled in for each point dataset below, where it can be changed.` }];
-      }
+      case "point":
+        return [];  // the ? beside the box explains each option
       case "matchup":
         return app ? [] : [{ text: "Untick Ask to run the script as a batch job, e.g. with SLURM." }];
       case "files":
@@ -920,7 +960,7 @@
     if (!context.fvcom) for (const name of GROUPS.fvcom) delete errors[name];
     if (!needsThickness()) delete errors.thickness;
     $("row-subregions_file").hidden = form.subregions !== "file";
-    const required = needsPointTimeRes();
+    const required = needsPointYears();
     for (const name of ["point_start", "point_end"]) {
       $(`s-${name}-label`).classList.toggle("is-required", required);
       $(`s-${name}-required`).hidden = !required;
@@ -974,8 +1014,6 @@
     message: "",
     // an unidentified row takes its default ticks once it is filled in
     needsDefaults: !row.model_variable,
-    // the sync of each pop-out of the model's variables, one on each page the row is on
-    syncs: [],
     datasets: [
       ...row.gridded.map((dataset) => ({ ...dataset, kind: "gridded" })),
       ...row.point.map((dataset) => ({ ...dataset, kind: "point" })),
@@ -1038,8 +1076,6 @@
     }
     update(row);
     summarise();
-    // the pop-outs of variables, if they have been opened, tick what the box holds
-    row.syncs.forEach((sync) => sync());
   }
 
   // the row's simulation variable box on the page shown, or on the other
@@ -1102,11 +1138,14 @@
 
   function update(row) {
     const { views, chips } = row.dom;
-    for (const { tr, input, msg } of views) {
+    for (const { kind, tr, input, msg } of views) {
       if (input.value !== row.value) input.value = row.value;
       input.title = row.value;
       tr.classList.toggle("is-empty", row.status === "empty");
       tr.classList.toggle("is-invalid", row.status === "invalid");
+      // the user's own data is always ticked
+      tr.classList.toggle("is-selected", row.status === "ok"
+        && (chips.some((chip) => chip.dataset.kind === kind && chip.dataset.checked) || ownChips(row, kind).length > 0));
       input.setAttribute("aria-invalid", String(row.status === "invalid"));
       msg.replaceChildren(...message(row));
     }
@@ -1135,6 +1174,8 @@
     else if (dataset.decadal && !woa23Period([+opts.start, +opts.end])) {
       errors.end = `WOA23 publishes this per decade, so these years must sit inside one: ${WOA23_DECADES}.`;
     }
+    const outside = outsideOutput(opts.start, opts.end);
+    if (outside && outside.level === "error") errors.end = outside.text;
     return errors;
   }
 
@@ -1170,7 +1211,11 @@
       control.classList.toggle("is-invalid", Boolean(errors[name]));
       control.setAttribute("aria-invalid", String(Boolean(errors[name])));
     }
-    opts.msg.textContent = Object.values(errors).find(Boolean) || "";
+    // years partly outside the output are only warned about, in amber
+    const outside = shown && !Object.keys(errors).length ? outsideOutput(dataset.opts.start, dataset.opts.end) : null;
+    opts.msg.textContent = Object.values(errors).find(Boolean) || (outside ? outside.text : "");
+    opts.msg.classList.toggle("is-warn", Boolean(outside) && !Object.keys(errors).length);
+    for (const name of ["start", "end"]) opts.controls[name].classList.toggle("is-outside", Boolean(outside));
     return Object.keys(errors).length > 0;
   }
 
@@ -1201,6 +1246,13 @@
       autocomplete: "off",
       "aria-label": `${key === "start" ? "First" : "Last"} year of ${name}`,
     }));
+    if (outputYears) {
+      // the arrow lists the years of the simulation's output; any year can still be typed
+      for (const box of [controls.start, controls.end]) {
+        box.classList.add("is-year");
+        withChoices(box, outputYearList);
+      }
+    }
     const years = el("span", { class: "opts__years" },
       controls.start, el("span", { class: "dash", text: "–" }), controls.end);
     const yearsLabel = el("span", { class: "opts__label" }, "Years");
@@ -1272,7 +1324,8 @@
       el("span", { class: "chip__name", text: dataset.label }),
       el("span", {
         class: "chip__region" + (dataset.user ? " is-yours" : dataset.region_name === context.region ? " is-domain" : ""),
-        text: dataset.region,
+        // gridded recipes say whether they are a climatology or a time series
+        text: dataset.kind === "gridded" && !dataset.user ? `${dataset.region} ${dataset.climatology ? "clim" : "TS"}` : dataset.region,
       }));
     return { dataset, box, label, info: coverageInfo(dataset), opts: buildOptions(row, dataset) };
   }
@@ -1330,16 +1383,16 @@
   const ownChips = (row, kind) =>
     row.own.filter((entry) => entry.kind === kind).map((entry) => ownChip(row, entry));
 
-  // the model's variables, in a pop-out under a box (see OceanValGUI.variablesPicker)
-  function variablesPicker(options) {
-    return OceanValGUI.variablesPicker({ available: state.available, longNames: state.long_names || {}, ...options });
+  // the model's variables, listed as a box is typed in (see OceanValGUI.variableBox)
+  function variableBox(input, options) {
+    return OceanValGUI.variableBox(input, { available: state.available, longNames: state.long_names || {}, ...options });
   }
 
   const DATASET_HEADS = { gridded: "What gridded datasets do you want?", point: "What point datasets do you want?" };
 
   function titleCell(row) {
     return el("td", {},
-      el("span", { class: "obs__title", text: row.title }),
+      el("span", { class: "obs__title", text: row.display || row.title }),
       row.variable === row.title.toLowerCase() ? null : el("code", { class: "obs__key", text: row.variable }));
   }
 
@@ -1366,12 +1419,11 @@
     });
     input.addEventListener("input", () => setValue(row, input.value));
     const msg = el("p", { class: "field__msg", id: `message-${kind}-${row.variable}` });
-    // any number of the model's variables can be ticked
-    const picker = variablesPicker({ get: () => row.value, set: (value) => setValue(row, value), multi: true });
-    if (picker) row.syncs.push(picker.sync);
+    // any number of the model's variables can be summed, as a+b (a pick is an input event, so setValue takes it)
+    variableBox(input, { multi: true });
     const cells = [
       titleCell(row),
-      el("td", { "data-label": "What is the simulation variable name?" }, input, msg, picker ? picker.details : null),
+      el("td", { "data-label": "What is the simulation variable name?" }, input, msg),
       datasetsCell(DATASET_HEADS[kind],
         [...row.dom.chips.filter((chip) => chip.dataset.kind === kind), ...ownChips(row, kind)],
         `No ${kind} dataset for ${row.title}`),
@@ -1450,7 +1502,7 @@
   }
 
   // ---- pop-outs close when you click outside them, or press Escape ----
-  const POPOVERS = "details.vars[open], details.opts__help[open]";
+  const POPOVERS = "details.opts__help[open]";
   document.addEventListener("click", (event) => {
     const path = event.composedPath();
     for (const details of document.querySelectorAll(POPOVERS)) {
@@ -1563,6 +1615,7 @@
     $("page-gridded").hidden = kind !== "gridded";
     $("page-point").hidden = kind !== "point";
     $("page-title").textContent = PAGE_TITLES[kind];
+    $("page-title").hidden = true;  // each page opens with its own heading
     document.title = `${PAGE_TITLES[kind]} · OceanVal`;
     labelButtons();
     summarise();
@@ -1668,10 +1721,32 @@
     };
   }
 
+  // told on Continue from the point datasets' page when nothing has been ticked on either page,
+  // which leaves the user there
+  function tellNothingTicked() {
+    const close = () => { overlay.remove(); writeButton.focus(); };
+    const back = el("button", { type: "button", class: "btn btn--primary", id: "nothing-return", text: "Return" });
+    back.addEventListener("click", close);
+    const overlay = el("div", { class: "picker", id: "nothing-ticked" },
+      el("div", { class: "picker__card restart__card", role: "dialog", "aria-modal": "true", "aria-labelledby": "nothing-title" },
+        el("div", { class: "restart__body" },
+          el("h2", { id: "nothing-title", text: "You have not selected any datasets" }),
+          el("p", { text: "Nothing is ticked on the gridded or the point datasets page, so there is nothing to match up. "
+            + "Return to the point data page and tick at least one dataset." })),
+        el("div", { class: "picker__foot" }, back)));
+    overlay.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
+    document.body.append(overlay);
+    back.focus();
+  }
+
   writeButton.addEventListener("click", async () => {
     if (busy || writeButton.disabled) return;
     if (page === "gridded") {
       showPage("point");
+      return;
+    }
+    if (!tickedDatasets().length) {
+      tellNothingTicked();
       return;
     }
     setBusy(true);

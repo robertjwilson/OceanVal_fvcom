@@ -23,18 +23,15 @@ EXAMPLES = {
         "surface": {
             "title": "Surface",
             "text": [
-                "Maps of the model's values at the sea surface, which is its top level.",
+                "Maps of the model's values at the sea surface.",
                 MONTHS_TEXT,
             ],
         },
         "bottom": {
             "title": "Bottom",
             "text": [
-                "Maps of the model's values at the sea bed: in each place, the value in the deepest cell that is not "
-                "missing.",
-                "On a shallow shelf that is close to the surface, and offshore it is the deepest level, so the maps "
-                "follow the shape of the sea floor. They are made as the surface's are: the annual mean, and each "
-                "month on one colour scale.",
+                "Maps of the model's values at the sea bed.",
+                "They are made as the surface's are: the annual mean, and each month on one colour scale.",
             ],
         },
         "water_column": {
@@ -56,13 +53,13 @@ EXAMPLES = {
 # what each layer is, in the sentence that begins a pop-out's words, and what more is said of the bottom and the
 # water column
 LAYER_WORDS = {
-    "surface": "at the sea surface (its top level)",
+    "surface": "at the sea surface",
     "bottom": "at the sea bed",
     "water_column": "through the whole water column",
 }
 LAYER_DETAIL = {
     "surface": None,
-    "bottom": "The bottom is the value in the deepest cell that is not missing, in each place.",
+    "bottom": None,
     "water_column": (
         "The water column is reduced to one value in each place in the way chosen in the box under the tick: the "
         "vertical mean, weighted by the thickness of each cell, or the depth integral, the sum of each cell's value "

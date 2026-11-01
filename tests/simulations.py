@@ -92,6 +92,46 @@ ANALYSIS_THICKNESS = [1.0, 2.0, 7.0]
 ANALYSIS_LEVEL_VALUES = [10.0, 8.0, 4.0]
 
 
+# the two simulations compare_simulations() is tested with (the compared_*
+# fixtures of conftest.py), and that analyze() is run on alone to check that
+# each simulation of a comparison gets what analyze() gives it: A on the
+# analysis grid, and B on a finer one, which rises faster
+COMPARE_YEARS = (2012, 2013, 2014)
+TREND_A, TREND_B = 1.0, 3.0
+B_LATS = list(np.arange(49.5, 53.6, 0.5))
+B_LONS = list(np.arange(-4.5, 0.6, 0.5))
+# what the monthly simulations are compared by
+COMPARE_CLIMATOLOGY = {"Temperature": {"start": 2012, "end": 2014, "surface": True}}
+COMPARE_LONG_TERM = {"Temperature": {"start": 2012, "end": 2014, "surface": True}}
+# everything analyze() does, for the daily simulations
+EVERY_OPTION = dict(
+    variables={"Temperature": "thetao", "Chlorophyll": "P1_Chl+P2_Chl"},
+    climatology={"Temperature": {"start": 2012, "end": 2014, "surface": True, "bottom": True, "water_column": "mean"}},
+    phenology={"Chlorophyll": {"start": 2012, "end": 2014}},
+    long_term={"Temperature": {"start": 2012, "end": 2014, "surface": True}},
+    seasonal={"Temperature": {"start": 2012, "end": 2014, "surface": True}},
+    map_changes={
+        "Temperature": {
+            "historical": {"start": 2012, "end": 2012},
+            "future": [{"start": 2014, "end": 2014}],
+            "plot": "absolute_changes",
+            "change": "absolute",
+            "surface": True,
+        }
+    },
+    thickness="e3t",
+    stations={"Station": [-2.0, 51.5]},
+)
+# a transect of every kind across the daily simulations
+COMPARE_TRANSECT = {
+    "start": [-2.0, 50.0],
+    "end": [-2.0, 53.0],
+    "climatology": {"start": 2012, "end": 2014},
+    "vertical": {"start": 2012, "end": 2014},
+    "trends": {"start": 2012, "end": 2014, "how": "absolute"},
+}
+
+
 def analysis_peak_day(row):
     """The day of the year chl peaks on in a row of the analysis grid."""
     return 60 + 30 * row
@@ -285,3 +325,35 @@ def write_fvcom(root):
         {"units": "days since 1858-11-17 00:00:00"},
     )
     dataset.to_netcdf(os.path.join(folder, "run_avg_0001.nc"))
+
+
+# raw FVCOM output (viewer_simulations.fvcom_months), two simulations on the one mesh that compare_simulations()
+# is tested with, and analyze() is run on alone to check that each simulation of a comparison gets what analyze()
+# gives it: Temperature on the nodes, Velocity on the elements, every analysis. B rises faster than A.
+FVCOM_YEARS = {"start": 2012, "end": 2013}
+FVCOM_COMPARE_OPTIONS = dict(
+    variables={"Temperature": "temp", "Velocity": "u"},
+    climatology={
+        "Temperature": dict(FVCOM_YEARS, surface=True, bottom=True, water_column="integral"),
+        "Velocity": dict(FVCOM_YEARS, surface=True, water_column="mean"),
+    },
+    phenology={"Temperature": FVCOM_YEARS},
+    long_term={"Temperature": dict(FVCOM_YEARS, surface=True)},
+    seasonal={"Velocity": dict(FVCOM_YEARS, surface=True)},
+    stations={"Middle": [-4.52, 50.31]},
+    map_changes={
+        "Temperature": {
+            "historical": {"start": 2012, "end": 2012},
+            "future": [{"start": 2013, "end": 2013}],
+            "plot": "absolute_changes",
+            "change": "absolute",
+            "surface": True,
+        }
+    },
+    transects={
+        "Temperature": [
+            {"start": [-5.0, 50.25], "end": [-4.0, 50.25], "climatology": FVCOM_YEARS, "vertical": FVCOM_YEARS}
+        ],
+        "Velocity": [{"start": [-4.47, 50.0], "end": [-4.47, 51.0], "climatology": FVCOM_YEARS}],
+    },
+)

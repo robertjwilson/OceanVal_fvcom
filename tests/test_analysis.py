@@ -12,6 +12,7 @@ import shutil
 
 import cftime
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 
@@ -20,6 +21,10 @@ from oceanval import analysis, analysis_forms, surface
 from simulations import (
     ANALYSIS_LEVEL_VALUES,
     ANALYSIS_THICKNESS,
+    B_LATS,
+    B_LONS,
+    TREND_A,
+    TREND_B,
     analysis_peak_day,
     write_analysis_simulation,
     write_month_files,
@@ -68,11 +73,13 @@ class TestOrderOfTheChain:
     and the renaming last."""
 
     @staticmethod
-    def chain(monkeypatch, files, parts, years, layer, shift=None, missing=None):
+    def chain(monkeypatch, files, parts, years, layer, shift=None, missing=None, convert=None):
         import nctoolkit as nc
 
         monkeypatch.setattr(nc.DataSet, "run", lambda self: None)
         row = {"key": "chl", "name": "chl", "parts": parts, "as_missing": missing}
+        if convert is not None:
+            row["convert"] = convert
         ds = analysis._model_data(files, row, years, shift, layer, 3)
         return ds.history[-1]
 
@@ -98,6 +105,33 @@ class TestOrderOfTheChain:
         files = sorted(glob.glob(os.path.join(daily, "*", "*ptrc_T.nc")))
         command = self.chain(monkeypatch, files, ["P1_Chl", "P2_Chl"], (2013, 2014), "surface", missing=[0, 0])
         assert self.first_applied(command, "-selname", "-topvalue", "-setrtomiss", "-expr"), command
+
+    @pytest.mark.parametrize("parts, last", [(["thetao"], "-chname"), (["P1_Chl", "P2_Chl"], "-expr")])
+    def test_a_comparisons_conversion_of_units_is_last(self, daily, monkeypatch, parts, last):
+        """After the missing value, which is in the simulation's own units, and after a sum, so it is made once."""
+        stream = "grid_T" if parts == ["thetao"] else "ptrc_T"
+        files = sorted(glob.glob(os.path.join(daily, "*", f"*{stream}.nc")))
+        command = self.chain(monkeypatch, files, parts, (2013, 2014), "surface", missing=[0, 0], convert=(0.001, -273.15))
+        assert self.first_applied(command, "-setrtomiss", last, "-mulc,0.001", "-addc,-273.15"), command
+
+    @pytest.mark.parametrize("convert, says", [(None, ()), ((1, 0), ()), ((1000, 0), ("-mulc,1000",)), ((1, 2.5), ("-addc,2.5",))])
+    def test_only_what_converts_is_asked_for(self, daily, monkeypatch, convert, says):
+        files = sorted(glob.glob(os.path.join(daily, "*", "*grid_T.nc")))
+        command = self.chain(monkeypatch, files, ["thetao"], (2013, 2014), "surface", convert=convert)
+        assert [word for word in ("-mulc", "-addc") if word in command] == [said.split(",")[0] for said in says]
+        assert all(said in command for said in says)
+
+    def test_a_chosen_time_step_and_file_are_the_ones_read(self, daily, monkeypatch):
+        import nctoolkit as nc
+
+        files = sorted(glob.glob(os.path.join(daily, "*", "*grid_T.nc")))
+        monkeypatch.setattr(nc.DataSet, "run", lambda self: None)
+        row = {"key": "chl", "name": "chl", "parts": ["thetao"], "as_missing": None}
+        ds = analysis._model_data(files, row, None, None, "surface", 3, at=(files[1], 1))
+        assert "timestep=2" in ds.history[-1] and ds.start == [files[1]]
+        # without it, the first of the first file, as before
+        ds = analysis._model_data(files, row, None, None, "surface", 3)
+        assert "timestep=1" in ds.history[-1] and ds.start == [files[0]]
 
     def test_the_variable_and_the_first_time_step_are_chosen_together_first(self, daily, monkeypatch):
         files = sorted(glob.glob(os.path.join(daily, "*", "*grid_T.nc")))
@@ -869,6 +903,63 @@ def test_the_report_with_transects(tmp_path):
     assert "oceanval-copy-code" not in page
 
 
+class TestTheSimulationsOfAComparison:
+    """analyze() of one of the simulations tests/test_sim_compare.py compares,
+    with the comparison's options (the analysed_* fixtures of conftest.py,
+    run once a session): what it gives, which the comparison must give that
+    simulation too. thetao is its level's value plus the month, plus the
+    simulation's trend for each year after 2012."""
+
+    def test_the_monthly_climatology_and_long_term_series_of_b(self, analysed_monthly_b):
+        found, info = analysed_monthly_b
+        assert [v["key"] for v in info["variables"]] == ["temperature"]
+        annual = values(os.path.join(found, "temperature_surface_annual.nc"), "temperature")
+        # 10 + the mean of the months (6.5) + the trend over 2012-2014 (mean of 0, 1, 2 years)
+        assert annual.shape[-1] == len(B_LATS) * len(B_LONS)
+        assert np.allclose(annual, 10 + 6.5 + TREND_B, atol=1e-4)
+        frame = pd.read_csv(os.path.join(found, "temperature_surface_long_term.csv"))
+        domain = frame[frame.name == "Full Domain"].groupby("year").value.mean()
+        assert domain.loc[2012] == pytest.approx(10 + 6.5, abs=1e-4)
+        assert domain.loc[2014] == pytest.approx(10 + 6.5 + 2 * TREND_B, abs=1e-4)
+
+    def test_every_option_of_a(self, analysed_daily_a):
+        found, info = analysed_daily_a
+        assert [v["key"] for v in info["variables"]] == ["temperature", "chlorophyll"]
+        assert {
+            "temperature_surface_monthly.nc",
+            "chlorophyll_surface_daily.nc",
+            "temperature_surface_change1.nc",
+            "temperature_surface_seasonal.csv",
+        } <= set(os.listdir(found))
+
+        def annual(layer):
+            return values(os.path.join(found, f"temperature_{layer}_annual.nc"), "temperature")
+
+        # each month's days are its number, and the mean year is a year after the first
+        assert np.allclose(annual("surface"), ANALYSIS_LEVEL_VALUES[0] + 6.5 + TREND_A, atol=1e-4)
+        assert np.allclose(annual("bottom"), ANALYSIS_LEVEL_VALUES[-1] + 6.5 + TREND_A, atol=1e-4)
+        column = np.average(ANALYSIS_LEVEL_VALUES, weights=ANALYSIS_THICKNESS)
+        assert np.allclose(annual("mean"), column + 6.5 + TREND_A, atol=1e-4)
+        change = values(os.path.join(found, "temperature_surface_change1.nc"), "temperature")
+        assert np.allclose(change, 2 * TREND_A, atol=1e-4)
+        with xr.open_dataset(os.path.join(found, "chlorophyll_phenology.nc")) as ds:
+            days = ds[analysis.PEAK_DAY].values
+        # a day out in places for the leap year
+        assert days[:, 0] == pytest.approx([analysis_peak_day(row) for row in range(days.shape[0])], abs=1.5)
+        stations = pd.read_csv(os.path.join(found, "temperature_surface_long_term.csv"))
+        assert "Station" in set(stations.name)
+
+    def test_a_transect_of_every_kind_of_b(self, analysed_transects_b):
+        found, info = analysed_transects_b
+        options = info["variables"][0]["transects"]["lines"][0]["options"]
+        assert set(options) == {"climatology", "vertical", "trends"}
+        frames = {name: pd.read_csv(os.path.join(found, option["csv"])) for name, option in options.items()}
+        for month, value in zip(frames["climatology"].month, frames["climatology"].value):
+            assert value == pytest.approx(ANALYSIS_LEVEL_VALUES[0] + month + TREND_B, abs=1e-4)
+        for _, part in frames["trends"].groupby("position"):
+            assert part.sort_values("year").value.diff().dropna().to_numpy() == pytest.approx(TREND_B)
+
+
 class TestForms:
     def test_the_simulation_needs_no_domain_or_years(self, daily, tmp_path):
         form = dict(analysis_forms.default_setup_form(str(tmp_path)), simdir=daily, ndown="1")
@@ -1050,13 +1141,14 @@ class TestForms:
             "missing_to": "The end of the range must not be less than its start."
         }
 
-    def test_whether_the_report_has_figure_code_must_be_said(self):
+    def test_the_figure_code_is_yes_or_no_and_not_answering_is_no(self):
         assert analysis_forms.check_figure_code("yes") == (True, None)
         assert analysis_forms.check_figure_code("No") == (False, None)
-        for choice in ("", None, "maybe"):
-            assert analysis_forms.check_figure_code(choice) == (
-                None, "Say whether the report should have code to reproduce its figures."
-            )
+        for choice in ("", None):
+            assert analysis_forms.check_figure_code(choice) == (False, None)
+        assert analysis_forms.check_figure_code("maybe") == (
+            None, "Say whether the report should have code to reproduce its figures."
+        )
 
     def test_the_script_calls_analyze(self, monkeypatch):
         arguments = analysis_forms.arguments(

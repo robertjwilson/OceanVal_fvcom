@@ -335,19 +335,19 @@ class TestTimeShift:
 
 
 class TestOptions:
-    def test_the_pop_outs_start_with_every_variable_ticked_and_nothing_else(self, app, sim):
+    def test_the_pop_outs_start_with_nothing_ticked(self, app, sim):
         state = to_options(app)
         assert app.view == "analyze_options"
         for kind in ("climatology", "long_term", "seasonal"):
             assert state["forms"][kind]["rows"]["Temperature"] == {
-                "use": True, "start": "", "end": "", "surface": False, "bottom": False, "water_column": False, "how": "",
+                "use": False, "start": "", "end": "", "surface": False, "bottom": False, "water_column": False, "how": "",
                 "window": "1", "show": "absolute",
             }
-        assert state["forms"]["phenology"]["rows"]["Chlorophyll"] == {"use": True, "start": "", "end": ""}
+        assert state["forms"]["phenology"]["rows"]["Chlorophyll"] == {"use": False, "start": "", "end": ""}
         assert state["forms"]["climatology"]["thickness"] == ""
         assert state["cores"] == "" and state["missing"] == {"from": "", "to": ""}
         # nor whether the report has code to reproduce its figures
-        assert state["figure_code"] == ""
+        assert state["figure_code"] == "no"
         assert state["nemo_ersem"] is False
         assert state["chosen"] == {
             "climatology": None, "phenology": None, "long_term": None, "seasonal": None, "map_changes": None,
@@ -522,7 +522,7 @@ class TestOptions:
         assert post(app, "/api/analyze_option", {"kind": "missing", "form": {"from": "0", "to": "0"}})[0] == 200
         assert post(app, "/api/analyze_option", {"kind": "figure_code", "form": {"choice": "no"}})[0] == 200
         assert get_json(app, "/api/state")[1]["analyze"]["output"] == {
-            "out_dir": app.cwd, "out": "analysis.py", "replace_analysis": False}
+            "out_dir": app.cwd, "out": "analysis.py", "out_typed": False, "replace_analysis": False}
         os.makedirs(os.path.join(app.cwd, analysis.FOLDER))
         # which the user must tick to replace, having named the directory
         status, reply = post(app, "/api/analyze_run", {"form": {"out_dir": app.cwd, "out": "analysis.py"}})
@@ -552,11 +552,8 @@ class TestOptions:
         assert post(app, "/api/analyze_option", {"kind": "missing", "form": {"from": "x", "to": ""}})[0] == 400
         assert post(app, "/api/analyze_run")[0] == 400
         assert post(app, "/api/analyze_option", {"kind": "missing", "form": {"from": "0", "to": "0"}})[0] == 200
-        # whether the report has code to reproduce its figures must be answered
-        status, reply = post(app, "/api/analyze_run")
-        assert status == 400 and reply["errors"] == {
-            "figure_code": "Say whether the report should have code to reproduce its figures."
-        }
+        # whether the report has code to reproduce its figures is not required: it starts at "no"
+        assert get_json(app, "/api/state")[1]["analyze"]["figure_code"] == "no"
         assert post(app, "/api/analyze_option", {"kind": "figure_code", "form": {"choice": "maybe"}})[0] == 400
         assert post(app, "/api/analyze_option", {"kind": "figure_code", "form": {"choice": "yes"}}) == (200, {"ok": True})
         assert get_json(app, "/api/state")[1]["analyze"]["figure_code"] == "yes"
@@ -605,8 +602,7 @@ class TestOptions:
         assert status == 400 and reply["errors"] == {"cores": "Say how many cores OceanVal may use."}
         assert post(app, "/api/analyze_option", {"kind": "cores", "form": {"cores": "2"}})[0] == 200
         assert post(app, "/api/analyze_option", {"kind": "missing", "form": {"from": "0", "to": "0"}})[0] == 200
-        assert post(app, "/api/analyze_save_script")[0] == 400
-        assert post(app, "/api/analyze_option", {"kind": "figure_code", "form": {"choice": "no"}})[0] == 200
+        # not answering whether the report has figure code is "no"
         assert app.view == "analyze_options" and not os.path.exists(os.path.join(app.cwd, "analysis.py"))
         assert post(app, "/api/analyze_save_script") == (200, {"ok": True})
         # the script is written, and nothing is run
@@ -650,7 +646,7 @@ class TestMapChanges:
     def test_the_pop_out_starts_with_every_variable_ticked_and_nothing_else(self, app, sim):
         state = to_options(app)
         assert state["forms"]["map_changes"]["rows"]["Temperature"] == {
-            "use": True, "plot": "", "change": "", "surface": False, "bottom": False, "water_column": False, "how": "",
+            "use": False, "plot": "", "change": "", "surface": False, "bottom": False, "water_column": False, "how": "",
             **{f"{period}_{end}": "" for period in ("historical", "future1", "future2") for end in ("start", "end")},
         }
         assert state["forms"]["map_changes"]["thickness"] == ""
@@ -784,7 +780,7 @@ class TestTransects:
         }
         # each variable has transects of its own
         assert state["forms"]["transects"] == {
-            "rows": {name: {"use": True, "transects": [blank]} for name in ("Chlorophyll", "Temperature")},
+            "rows": {name: {"use": False, "transects": [blank]} for name in ("Chlorophyll", "Temperature")},
             "thickness": "",
         }
         assert state["chosen"]["transects"] is None
@@ -965,7 +961,7 @@ def test_the_dates_check_works_out_the_resolution(tmp_path):
 
 
 def test_analyze_in_a_browser(browser, tmp_path):
-    """The landing page, the variables OceanVal fills in in red and bold,
+    """The landing page, the variables OceanVal fills in in bold,
     and a pop-out whose Cancel forgets what was changed and whose Confirm
     keeps it."""
     write_analysis_simulation(str(tmp_path / "sim"))
@@ -986,8 +982,18 @@ def test_analyze_in_a_browser(browser, tmp_path):
         page.wait_for_function("() => !document.querySelector('#continue').disabled")
         page.click("#continue")
         page.wait_for_selector("#av-main:not([hidden])", timeout=60000)
+        assert page.inner_text("#av-lede") == "Choose the variables to analyze" and page.is_hidden("#title")
         # nothing is filled in for the user: there is one empty row
         assert page.locator("#av-rows > tr").count() == 1
+        # a lone blank row has nothing to remove (grey ×), but its + adds one; with something in it, × blanks the table
+        assert page.locator("#av-rows > tr").first.locator(".analyze-remove").is_disabled()
+        assert page.locator("#av-rows > tr").first.locator(".analyze-add").is_enabled()
+        page.locator("#av-rows > tr").first.locator("input").first.fill("X")
+        assert page.locator("#av-rows > tr").first.locator(".analyze-remove").is_enabled()
+        page.locator("#av-rows > tr").first.locator(".analyze-remove").click()
+        assert page.locator("#av-rows > tr").count() == 1
+        assert page.locator("#av-rows > tr").first.locator("input").first.input_value() == ""
+        assert page.locator("#av-rows > tr").first.locator(".analyze-remove").is_disabled()
         first = page.locator("#av-rows > tr").first.locator("td").first.locator("input")
         model = page.locator("#av-rows > tr").first.locator("td").nth(1).locator("input").first
         assert first.input_value() == "" and model.input_value() == ""
@@ -1004,7 +1010,7 @@ def test_analyze_in_a_browser(browser, tmp_path):
         assert page.input_value("#ao-cores") == "" and page.locator("#ao-cores option").all_text_contents() == [
             "Choose…", *[str(n) for n in range(1, os.cpu_count() + 1)]]
         assert page.input_value("#ao-missing_from") == "" and page.input_value("#ao-missing_from") == ""
-        assert not page.is_checked("#ao-code-yes") and not page.is_checked("#ao-code-no")
+        assert page.is_checked("#ao-code-no") and not page.is_checked("#ao-code-yes")
         # the regional subdomains are in the time series' pop-outs, not on this page
         assert page.locator("#area-subregions").count() == 1 and page.is_hidden("#area-subregions")
 
@@ -1016,14 +1022,13 @@ def test_analyze_in_a_browser(browser, tmp_path):
         # nothing to remove yet
         assert page.is_hidden("#clim-remove")
         assert page.locator("#clim-dialog .picker__foot button:visible").all_inner_texts() == ["Cancel", "Confirm"]
-        # the variable is ticked to start with, and nothing else is chosen; one variable has no All variables row
-        assert use.is_checked() and not surface.is_checked()
+        # nothing is ticked to start with; one variable has no All variables row
+        assert not use.is_checked() and not surface.is_checked()
         assert page.locator("#clim-all > tr").count() == 0
         assert "required" in page.inner_text("#clim-dialog thead").lower()
         assert page.is_enabled("#clim-confirm") and page.inner_text("#clim-msg") == ""
         assert page.locator("#clim-body input.is-year").first.get_attribute("placeholder") == "2013"
-        # with the variable unticked there is nothing to confirm, and a layer ticked ticks it again
-        use.uncheck()
+        # with the variable unticked there is nothing to confirm, and a layer ticked ticks it
         assert page.is_disabled("#clim-confirm") and "Tick at least one variable" in page.inner_text("#clim-msg")
         surface.check()
         assert use.is_checked() and page.is_enabled("#clim-confirm")
@@ -1054,28 +1059,29 @@ def test_analyze_in_a_browser(browser, tmp_path):
         page.click("#ao-continue")
         page.wait_for_selector("#ao-page-2:not([hidden])")
         assert page.is_hidden("#ao-page-1") and page.is_hidden("#ao-continue")
-        assert page.inner_text("#title") == "How should the analysis be run?"
-        # the last page is not reached until the cores are given, and the figure code question answered
+        assert page.is_hidden("#title")
+        # the last page is not reached until the cores are given
         assert page.is_disabled("#ao-next") and page.locator("#ao-run").count() == 0
         page.select_option("#ao-cores", "2")
         assert page.is_disabled("#ao-next")
         page.check("#ao-code-yes")
         wait_for(lambda: app.analyze_figure_code == "yes")
-        # the cores and the figure code are marked as required
+        # the cores are marked as required, the figure code is not
         assert "required" in page.inner_text("#ao-cores-group legend").lower()
-        assert "required" in page.inner_text("#ao-code-group legend").lower()
+        assert "required" not in page.inner_text("#ao-code-group legend").lower()
         # where the output is saved is the last page, which has the buttons that run the analysis
         assert page.is_enabled("#ao-next") and page.locator("#ao-run").count() == 0
         page.click("#ao-next")
         page.wait_for_selector("#ao-page-3:not([hidden])")
         assert page.is_hidden("#ao-page-2")
-        assert page.inner_text("#title") == "Where do you want the analysis to be saved?"
+        assert page.is_hidden("#title")
+        assert page.inner_text("#ao-save-lede") == "Choose where to save the analysis"
         assert page.input_value("#ao-out_dir") == app.cwd and page.input_value("#ao-out") == "analysis.py"
         assert page.is_enabled("#ao-run") and page.is_enabled("#ao-save")
-        # the script can be saved to run later, from a button to the right of the one that runs it
+        # the script can be saved to run later, from a button to the left of the one that runs it, which is on the right
         assert page.inner_text("#ao-save") == "Save Python script to run later"
-        assert page.evaluate("() => document.querySelector('#ao-save').getBoundingClientRect().left"
-                             " > document.querySelector('#ao-run').getBoundingClientRect().right")
+        assert page.evaluate("() => document.querySelector('#ao-run').getBoundingClientRect().left"
+                             " > document.querySelector('#ao-save').getBoundingClientRect().right")
         # a script that has no name cannot be written
         page.fill("#ao-out", "")
         assert page.is_disabled("#ao-run") and page.is_disabled("#ao-save")
@@ -1086,6 +1092,14 @@ def test_analyze_in_a_browser(browser, tmp_path):
         page.wait_for_selector("#ao-page-2:not([hidden])")
         page.click("#ao-next")
         assert page.input_value("#ao-out") == "mine.py"
+        # a file that exists is warned of only when its name is typed
+        assert page.locator("#ao-m-out .group__line.is-warn").count() == 0
+        open(os.path.join(app.cwd, "taken.py"), "w").close()
+        page.fill("#ao-out", "taken.py")
+        page.wait_for_selector("#ao-m-out .group__line.is-warn")
+        assert "already exists" in page.inner_text("#ao-m-out")
+        page.fill("#ao-out", "mine.py")
+        page.wait_for_function("document.querySelector('#ao-m-out .group__line.is-warn') === null")
         # Back goes to the tiles, which keep what was chosen
         page.click("#actions button:has-text('Back')")
         page.click("#actions button:has-text('Back')")
@@ -1222,9 +1236,10 @@ def test_map_changes_in_a_browser(browser, tmp_path):
 
         page.click("#ao-map_changes")
         page.wait_for_selector("#chg-dialog:not([hidden])")
-        # the variable is ticked to start with
-        assert page.is_hidden("#chg-remove") and page.is_enabled("#chg-confirm")
-        assert page.locator("#chg-body > tr.chg-main").first.locator("input[type=checkbox]").first.is_checked()
+        # the variable is not ticked to start with
+        assert page.is_hidden("#chg-remove") and page.is_disabled("#chg-confirm")
+        assert not page.locator("#chg-body > tr.chg-main").first.locator("input[type=checkbox]").first.is_checked()
+        page.locator("#chg-body > tr.chg-main").first.locator("input[type=checkbox]").first.check()
         main = page.locator("#chg-body > tr.chg-main").first
         years = main.locator("input.is-year")
         assert years.count() == 6
@@ -1287,11 +1302,11 @@ def test_map_changes_in_a_browser(browser, tmp_path):
         app.close()
 
 
-def open_analyze_option(browser, tmp_path, years, option, dialog, rows=(("Temperature", "thetao"),)):
+def open_analyze_option(browser, tmp_path, years, option, dialog, rows=(("Temperature", "thetao"),), daily=True):
     """The pop-out of an Analyze option (its button `ao-<option>`, its
     dialog id) of a simulation of years, for the variables rows (name, model
-    variable): (the page, the app, the errors)."""
-    write_analysis_simulation(str(tmp_path / "sim"), years=years)
+    variable): (the page, the app, the errors). With daily=False the output is monthly."""
+    write_analysis_simulation(str(tmp_path / "sim"), years=years, daily=daily)
     app = App(cwd=str(tmp_path))
     url = app.start()
     errors = []
@@ -1308,7 +1323,7 @@ def open_analyze_option(browser, tmp_path, years, option, dialog, rows=(("Temper
     page.wait_for_selector("#av-main:not([hidden])", timeout=60000)
     for number, (name, model) in enumerate(rows):
         if number:
-            page.click("#av-add")
+            page.locator("#av-rows > tr").last.locator(".analyze-add").click()
         page.locator("#av-rows > tr").nth(number).locator("td").first.locator("input").fill(name)
         page.locator("#av-rows > tr").nth(number).locator("td").nth(1).locator("input").first.fill(model)
     page.click("#av-continue")
@@ -1325,34 +1340,6 @@ def picker_of(app):
     """The model's variables the variables step offers, as the app sends them (the
     page's own `state` is not reachable from the console)."""
     return get_json(app, "/api/state")[1]["analyze"]["picker"]
-
-
-def test_add_all_variables_fills_the_rows_from_the_files(browser, tmp_path):
-    """Add all variables makes a row per variable in the output (long name,
-    variable name), and a second click adds nothing."""
-    write_analysis_simulation(str(tmp_path / "sim"), years=(2011, 2012))
-    app = App(cwd=str(tmp_path))
-    url = app.start()
-    page = browser.new_page(viewport={"width": 1280, "height": 1000})
-    page.goto(url)
-    page.wait_for_selector("#view-home:not([hidden])")
-    page.click("#home-analyze")
-    page.wait_for_selector("#view-setup:not([hidden])")
-    page.fill("#f-simdir", "sim")
-    page.fill("#f-ndown", "1")
-    page.wait_for_function("() => !document.querySelector('#continue').disabled")
-    page.click("#continue")
-    page.wait_for_selector("#av-main:not([hidden])", timeout=60000)
-    available = picker_of(app)["available"]
-    page.click("#av-add-all")
-    rows = page.locator("#av-rows > tr")
-    assert rows.count() == len(available)
-    models = [rows.nth(i).locator("td").nth(1).locator("input").first.input_value() for i in range(rows.count())]
-    assert sorted(models) == sorted(available)
-    page.click("#av-add-all")
-    assert page.locator("#av-rows > tr").count() == len(available)
-    assert not page.locator("#av-continue").is_disabled()
-    page.close()
 
 
 def open_analyze_variables_in_browser(browser, tmp_path):
@@ -1375,21 +1362,26 @@ def open_analyze_variables_in_browser(browser, tmp_path):
 
 
 def test_the_variable_searches_take_wildcards_in_a_browser(browser, tmp_path):
-    """P*_Chl finds P1_Chl and P2_Chl in a row's pop-out and in Add multiple variables."""
+    """P*_Chl finds P1_Chl and P2_Chl as a row's box is typed in and in Add multiple variables."""
     page, app = open_analyze_variables_in_browser(browser, tmp_path)
     try:
-        pop_out = page.locator("#av-rows > tr").first.locator("details.vars")
-        pop_out.locator("summary").click()
-        # the box is cleared and focused as the pop-out opens
-        page.wait_for_function("() => document.activeElement && document.activeElement.classList.contains('vars__search')")
-        search = pop_out.locator(".vars__search")
-        shown = lambda: pop_out.locator("tbody tr:not([hidden]) td:nth-child(2)").all_text_contents()
-        search.fill("P*_Chl")
+        box = page.locator("#av-rows > tr").first.locator("td").nth(1).locator("input")
+        assert page.locator("details.vars").count() == 0
+        shown = lambda: page.evaluate("() => [...document.querySelectorAll('.vars__popover:not([hidden]) tbody tr:not([hidden])')].map((row) => row.cells[1].textContent)")
+        box.fill("P*_Chl")
         assert shown() == ["P1_Chl", "P2_Chl"]
-        search.fill("e3?")
+        box.fill("e3?")
         assert shown() == ["e3t"]
-        search.fill("P*_Chl e3t")
+        box.fill("P*_Chl e3t")
         assert shown() == []
+        # after a + every row is shown, with P1_Chl ticked, and the next part is searched
+        box.fill("P1_Chl+")
+        assert len(shown()) == 4
+        assert page.locator('.vars__popover:not([hidden]) input[aria-label="Use P1_Chl"]').is_checked()
+        box.press_sequentially("P2")
+        assert shown() == ["P2_Chl"]
+        page.locator(".vars__popover:not([hidden]) tbody tr:not([hidden])").first.click()
+        assert box.input_value() == "P1_Chl+P2_Chl"
 
         page.click("#av-add-multiple")
         page.wait_for_selector("#multi-dialog:not([hidden])")
@@ -1413,41 +1405,22 @@ def variable_rows_of(page):
     return [rows.nth(i).locator("td").nth(1).locator("input").first.input_value() for i in range(rows.count())]
 
 
-def test_add_3d_and_2d_variables_split_the_variables_by_their_levels(browser, tmp_path):
-    """Add 3D variables adds those whose vertical axis has more than one level
-    (nctoolkit's contents), Add 2D variables the rest, and clicking again adds nothing."""
-    page, app = open_analyze_variables_in_browser(browser, tmp_path)
-    levels = picker_of(app)["levels"]
-    available = picker_of(app)["available"]
-    three = sorted(v for v in available if levels.get(v, 1) > 1)
-    two = sorted(v for v in available if levels.get(v, 1) <= 1)
-    assert "thetao" in three and "P1_Chl" in two
-    page.click("#av-add-3d")
-    assert sorted(variable_rows_of(page)) == three
-    assert not page.locator("#av-continue").is_disabled()
-    page.click("#av-add-3d")
-    assert sorted(variable_rows_of(page)) == three
-    page.click("#av-add-2d")
-    assert sorted(variable_rows_of(page)) == sorted(available)
-    page.click("#av-add-all")
-    assert len(variable_rows_of(page)) == len(available)
-    page.close()
-
-
-def test_add_2d_variables_alone_adds_no_3d_variable(browser, tmp_path):
-    page, app = open_analyze_variables_in_browser(browser, tmp_path)
-    levels = picker_of(app)["levels"]
-    page.click("#av-add-2d")
-    models = variable_rows_of(page)
-    assert models and all(levels.get(v, 1) <= 1 for v in models)
-    page.close()
+def add_every_variable(page):
+    page.click("#av-add-multiple")
+    page.wait_for_selector("#multi-dialog:not([hidden])")
+    cells = page.locator("#multi-grid .multi-cell:not([disabled])")
+    for i in range(cells.count()):
+        cells.nth(i).click()
+    page.click("#multi-confirm")
 
 
 def test_remove_all_variables_leaves_one_blank_row(browser, tmp_path):
     page, app = open_analyze_variables_in_browser(browser, tmp_path)
     # nothing to remove yet
     assert page.is_disabled("#av-remove-all")
-    page.click("#av-add-all")
+    add_every_variable(page)
+    available = picker_of(app)["available"]
+    assert sorted(variable_rows_of(page)) == sorted(available)
     assert not page.is_disabled("#av-remove-all")
     assert not page.is_disabled("#av-continue")
     page.click("#av-remove-all")
@@ -1455,8 +1428,7 @@ def test_remove_all_variables_leaves_one_blank_row(browser, tmp_path):
     assert page.is_disabled("#av-continue")
     assert page.is_disabled("#av-remove-all")
     # and the variables can be added again
-    page.click("#av-add-all")
-    available = picker_of(app)["available"]
+    add_every_variable(page)
     assert sorted(variable_rows_of(page)) == sorted(available)
     page.close()
 
@@ -1666,7 +1638,7 @@ def test_transects_in_a_browser(browser, tmp_path):
         rows = [("Temperature", "thetao"), ("Chlorophyll", "P1_Chl+P2_Chl")]
         for number, (name, model) in enumerate(rows):
             if number:
-                page.click("#av-add")
+                page.locator("#av-rows > tr").last.locator(".analyze-add").click()
             page.locator("#av-rows > tr").nth(number).locator("td").first.locator("input").fill(name)
             page.locator("#av-rows > tr").nth(number).locator("td").nth(1).locator("input").first.fill(model)
         page.click("#av-continue")
@@ -1679,12 +1651,14 @@ def test_transects_in_a_browser(browser, tmp_path):
         page.wait_for_selector("#trans-dialog:not([hidden])")
         assert page.is_hidden("#trans-remove")
         assert page.locator("#trans-dialog .picker__foot button:visible").all_inner_texts() == ["Cancel", "Confirm"]
-        # a section for each variable, each ticked to start with, with one transect with nothing in it
+        # a section for each variable, each unticked to start with, with one transect with nothing in it
         sections = page.locator("#trans-body .transect-var")
-        assert sections.count() == 2 and page.is_enabled("#trans-confirm")
+        assert sections.count() == 2 and page.is_disabled("#trans-confirm")
         assert "north–south" in page.inner_text("#trans-dialog .transect-rule")
         temperature = sections.nth(0)
-        assert temperature.locator(".transect-var__head input[type=checkbox]").is_checked()
+        assert not temperature.locator(".transect-var__head input[type=checkbox]").is_checked()
+        for section in (temperature, sections.nth(1)):
+            section.locator(".transect-var__head input[type=checkbox]").check()
         # the transects of chlorophyll are left out
         sections.nth(1).locator(".transect-var__head input[type=checkbox]").uncheck()
         cards = temperature.locator(".transect-card")
@@ -1799,7 +1773,7 @@ TWO_VARIABLES = (("Temperature", "thetao"), ("Chlorophyll", "P1_Chl+P2_Chl"))
 def test_the_all_variables_row_sets_every_variable_in_a_browser(browser, tmp_path):
     """With more than one variable, a pop-out's table has an All variables row at the top: what is set
     there is set for every variable it applies to, a variable set otherwise has a Reset back to it, and
-    each variable's tick, ticked to start with, leaves it out."""
+    each variable's tick, unticked to start with, leaves it out."""
     page, app, errors = open_analyze_option(browser, tmp_path, (2011, 2012, 2013, 2014), "climatology", "clim-dialog",
                                             rows=TWO_VARIABLES)
     try:
@@ -1808,9 +1782,10 @@ def test_the_all_variables_row_sets_every_variable_in_a_browser(browser, tmp_pat
         rows = page.locator("#clim-body > tr")
         temperature, chlorophyll = rows.nth(0), rows.nth(1)
         ticks = lambda row: row.locator("input[type=checkbox]")
-        # every variable is ticked to start with, and so is the All variables row's tick
-        assert ticks(temperature).first.is_checked() and ticks(chlorophyll).first.is_checked()
-        assert ticks(all_row).first.is_checked()
+        # no variable is ticked to start with, nor is the All variables row's tick; ticking it ticks every variable
+        assert not ticks(temperature).first.is_checked() and not ticks(chlorophyll).first.is_checked()
+        assert not ticks(all_row).first.is_checked()
+        ticks(all_row).first.check()
         # the years and the surface, set once
         all_row.locator("input.is-year").nth(0).fill("2011")
         all_row.locator("input.is-year").nth(1).fill("2013")
@@ -1869,6 +1844,28 @@ def test_a_variable_ticked_with_no_layer_is_said_in_a_browser(browser, tmp_path)
         page.wait_for_function("() => document.querySelectorAll('#clim-body .analyze-msg')[1].textContent !== ''")
         assert "untick the variable" in page.locator("#clim-body > tr").nth(1).locator(".analyze-msg").inner_text()
         assert app.analyze_chosen["climatology"] is None
+        assert errors == []
+    finally:
+        app.close()
+
+
+def test_the_errors_of_the_pop_outs_are_red_and_bold_in_a_browser(browser, tmp_path):
+    """A row's error (an end year before the start) is red and bold, as the page's --red token."""
+    page, app, errors = open_analyze_option(browser, tmp_path, (2013, 2014), "climatology", "clim-dialog")
+    try:
+        row = page.locator("#clim-body > tr").first
+        row.locator("input[type=checkbox]").nth(1).check()
+        row.locator("input.is-year").nth(0).fill("2014")
+        row.locator("input.is-year").nth(1).fill("2013")
+        page.click("#clim-confirm")
+        page.wait_for_function("() => document.querySelector('#clim-body .analyze-msg').textContent !== ''")
+        message = row.locator(".analyze-msg")
+        assert "End must not be before start" in message.inner_text()
+        red = page.evaluate("() => { const probe = document.createElement('i'); probe.style.color = 'var(--red)';"
+                            " document.body.append(probe); const colour = getComputedStyle(probe).color; probe.remove(); return colour; }")
+        style = message.evaluate("(node) => { const css = getComputedStyle(node); return [css.color, +css.fontWeight]; }")
+        assert style[0] == red
+        assert style[1] >= 700
         assert errors == []
     finally:
         app.close()
@@ -1950,7 +1947,7 @@ def test_the_transects_of_a_variable_are_copied_to_every_variable_in_a_browser(b
 
 def test_the_names_drop_down_the_larger_pop_outs_and_the_missing_value_in_a_browser(browser, tmp_path, monkeypatch):
     """The arrow of "Environmental variable" lists the preset names, and choosing one fills
-    in the Variable name in the simulation in red and bold; the pop-outs are 1300px wide; and the
+    in the Variable name in the simulation in bold; the pop-outs are 1300px wide; and the
     missing value found in the data is amber, until it is typed over."""
     from oceanval import missing_probe
 
@@ -2121,6 +2118,30 @@ def test_the_other_pop_outs_with_layers_have_the_info_buttons_too(browser, tmp_p
         app.close()
 
 
+def test_phenology_without_daily_output_says_so_and_closes_to_the_options(browser, tmp_path):
+    page, app, errors = open_analyze_option(browser, tmp_path, (2013, 2014), "climatology", "clim-dialog", daily=False)
+    try:
+        page.click("#clim-cancel")
+        page.click("#ao-phenology")
+        page.wait_for_selector("#no-daily:not([hidden])")
+        assert "daily output" in page.inner_text("#no-daily-text")
+        assert "Temperature" in page.inner_text("#no-daily-text")
+        assert page.is_hidden("#phen-dialog")
+        page.click("#no-daily-close")
+        assert page.is_hidden("#no-daily") and page.is_hidden("#phen-dialog")
+        assert page.is_visible("#view-analyze-options")
+        assert not page.evaluate("() => document.querySelector('main').inert")
+        # Escape closes it too
+        page.click("#ao-phenology")
+        page.wait_for_selector("#no-daily:not([hidden])")
+        page.keyboard.press("Escape")
+        assert page.is_hidden("#no-daily")
+        assert errors == []
+    finally:
+        page.close()
+        app.close()
+
+
 def test_the_phenology_pop_out_has_an_i_beside_its_title(browser, tmp_path):
     page, app, errors = open_analyze_option(browser, tmp_path, (2013, 2014), "phenology", "phen-dialog")
     try:
@@ -2197,3 +2218,39 @@ class TestClosingTheBrowser:
         assert app.status == "starting"
         assert not app.closed.wait(3)
         assert capsys.readouterr().out.count("The OceanVal window has gone quiet") == 1
+
+
+def test_the_required_tags_of_the_climatology_go_when_the_rows_are_filled(browser, tmp_path):
+    """The column tags over the climatology's rows stay until a ticked
+    variable has its years and a layer, and the red round a filled year box goes."""
+    page, app, errors = open_analyze_option(browser, tmp_path, (2011, 2012, 2013, 2014), "climatology", "clim-dialog")
+    try:
+        years = page.locator("#clim-dialog thead tr:last-child .own-req")
+        tick = page.locator("#clim-dialog thead .is-need .own-req")
+        row = page.locator("#clim-body > tr").first
+        assert years.nth(0).is_visible() and years.nth(1).is_visible() and tick.is_visible()
+        use = row.locator("input[type=checkbox]").first
+        if not use.is_checked():
+            use.check()
+        row.locator("input[type=checkbox]").nth(1).check()
+        page.wait_for_selector("#clim-dialog thead .is-need .own-req", state="hidden")
+        # a layer is not the years
+        assert years.nth(0).is_visible() and years.nth(1).is_visible()
+        start = page.locator("#clim-body input.is-year").nth(0)
+        end = page.locator("#clim-body input.is-year").nth(1)
+        red = "rgb(226, 165, 157)"
+        assert start.evaluate("node => getComputedStyle(node).borderTopColor") == red
+        start.fill("2012")
+        end.fill("2013")
+        page.wait_for_selector("#clim-dialog thead tr:last-child .own-req >> nth=1", state="hidden")
+        assert years.nth(0).is_hidden() and years.nth(1).is_hidden()
+        # the border changes colour over a transition
+        page.wait_for_function(
+            "([node, red]) => getComputedStyle(node).borderTopColor !== red", arg=[start.element_handle(), red]
+        )
+        end.fill("")
+        page.wait_for_selector("#clim-dialog thead tr:last-child .own-req >> nth=1", state="visible")
+        assert years.nth(0).is_hidden() and years.nth(1).is_visible()
+        assert not errors
+    finally:
+        app.close()

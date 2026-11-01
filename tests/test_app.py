@@ -54,8 +54,11 @@ SETUP_FORM = {
 OUTPUT_FORM = {
     "out_dir": "",
     "unused": [],
+    # the choices in `unused` are the user's own, as when the grid has been used
+    "existing_chosen": True,
     "existing_confirmed": False,
     "out": "matchup.py",
+    "out_typed": False,
 }
 
 # a matchup as matchup lists it with its question of whether the matchups are right
@@ -150,7 +153,7 @@ def fill_gridded_years(page):
         assert page.locator(f"#s-{name}").evaluate("node => node.yearChoices") == [2011, 2012]
     assert page.get_attribute("#s-clim_start", "placeholder") == "2011"
     assert page.get_attribute("#s-clim_end", "placeholder") == "2012"
-    assert page.text_content("#g-output-years") == "The simulation's output runs from 2011 to 2012, from the times in its files."
+    assert page.text_content("#g-output-years") == ""
     # the cores, missing values and subset are asked once the matchups are confirmed
     assert page.is_hidden("#s-cores")
     assert page.is_hidden("#s-missing_from")
@@ -164,6 +167,21 @@ def fill_gridded_years(page):
     for year in page.locator("#rows-gridded .opts:not([hidden]) input.is-num").all():
         if not year.input_value():
             year.fill("2011" if year.get_attribute("aria-label").startswith("First") else "2012")
+    # years outside the output (2011-2012) are said so at the dataset: warned
+    # about when partly outside, refused when none are in it
+    block = page.locator("#rows-gridded .opts:not([hidden])").first
+    first, last = block.locator("input.is-num").nth(0), block.locator("input.is-num").nth(1)
+    message = block.locator(".opts__msg")
+    first.fill("2009")
+    assert "These go beyond the 2011–2012" in message.text_content()
+    assert not page.is_disabled("#write")
+    first.fill("2005")
+    last.fill("2008")
+    assert "not in the simulation's output" in message.text_content()
+    assert page.is_disabled("#write")
+    first.fill("2011")
+    last.fill("2012")
+    assert message.text_content() == ""
 
 
 def fill_required_recipe_settings(page):
@@ -198,6 +216,12 @@ def fill_required_recipe_settings(page):
     assert "These go beyond the 2011–2012 found in the simulation's files." in page.text_content("#g-years")
     page.fill("#s-point_end", "2012")
     assert "go beyond" not in page.text_content("#g-years")
+    # none of the years in the output: refused
+    page.fill("#s-point_start", "2000")
+    page.fill("#s-point_end", "2005")
+    assert page.is_disabled("#write")
+    page.fill("#s-point_start", "2011")
+    page.fill("#s-point_end", "2012")
 
 
 def through_output(page):
@@ -812,10 +836,17 @@ class TestOutputChecks:
                 dict(OUTPUT_FORM, out_dir="old", **changes), str(tmp_path), report=report, made=made
             )
 
-        # each is used as it is, to start with, which must be confirmed
-        arguments, errors = check()
+        # until the user chooses, those the run makes are replaced and the others used,
+        # which must be confirmed
+        arguments, errors = check(existing_chosen=False)
         assert errors == {"existing_confirmed": ""}
-        assert (arguments["overwrite"], arguments["previous"]) == (False, True)
+        assert (arguments["overwrite"], arguments["previous"]) == (True, ["temperature/WOA23", "nitrate/glodap"])
+        arguments, errors = check(existing_chosen=False, existing_confirmed=True, unused=MIXED_KEYS)
+        assert not errors and (arguments["overwrite"], arguments["previous"]) == (True, ["temperature/WOA23", "nitrate/glodap"])
+        # with no report, only those the run makes are asked about, and replaced
+        arguments = check(report=False, existing_chosen=False, existing_confirmed=True)[0]
+        assert (arguments["overwrite"], arguments["previous"]) == (True, True)
+        # once chosen, none unused is each used as it is
         arguments, errors = check(existing_confirmed=True)
         assert not errors and (arguments["overwrite"], arguments["previous"]) == (False, True)
         # every one unused: those the run makes are replaced, the others ignored
@@ -1815,9 +1846,7 @@ class TestServer:
                 "selected": ["cobe2"],
             }
         ]
-        status, reply = post(app, "/recipes/write", {"rows": rows})
-        assert status == 400
-        assert {"start", "end"} <= set(reply["setting_errors"])
+        # no years is not an error: matchup's are left for the script to say
         assert post(app, "/recipes/write", {"rows": rows, "settings": recipe_settings(app)})[0] == 200
         units_match(app)
         wait_for(lambda: runs)
@@ -4426,6 +4455,68 @@ class TestBack:
         assert app.status == "finished"
         assert "answer: y\nmatching up\n" in app.console.since(0, None)["text"]
 
+    def failing_run(self, app, tmp_path, monkeypatch):
+        """Get as far as a matchup run that fails, with the units step carried
+        on from. Returns the units' boxes."""
+        failing = tmp_path / "failing.py"
+        failing.write_text("print('about to fail')\nraise SystemExit(1)\n")
+        start_run = app.start_run
+        monkeypatch.setattr(
+            app, "start_run", lambda args, label: start_run([args[0], str(failing)], label)
+        )
+        self.to_recipes(app, tmp_path)
+        self.write(app)
+        conversions = {"recipe:nitrate:woa23": {"multiplier": "2", "adder": ""}}
+        assert post(app, "/api/units_continue", {"conversions": conversions, "confirmed": True})[0] == 200
+        wait_for(lambda: app.view == "finished")
+        return conversions
+
+    def test_back_from_a_failed_run_goes_to_the_units(self, app, tmp_path, monkeypatch):
+        conversions = self.failing_run(app, tmp_path, monkeypatch)
+        assert app.status == "failed"
+        assert "about to fail" in app.console.since(0, None)["text"]
+        assert get_json(app, "/api/state")[1]["run"]["back"] is True
+        form = dict(app.setup_form)
+
+        assert post(app, "/api/back")[0] == 200
+        _, state = get_json(app, "/api/state")
+        assert (state["view"], state["run"]["back"]) == ("units_table", False)
+        # the failed run is forgotten, and what was entered is kept
+        assert (app.run, app.status, app.interim, app.report_arguments) == (None, None, None, None)
+        assert app.matchup_progress is None
+        assert app.setup_form == form
+        assert state["units"]["boxes"] == {
+            "recipe:nitrate:woa23": {"multiplier": "2", "adder": ""},
+        }
+        assert "about to fail" not in app.console.since(0, None)["text"]
+
+        # carried on from again, the matchup starts afresh and can fail again
+        assert post(app, "/api/units_continue", {"conversions": conversions, "confirmed": True})[0] == 200
+        wait_for(lambda: app.view == "finished")
+        assert app.status == "failed"
+        assert get_json(app, "/api/state")[1]["run"]["back"] is True
+
+    def test_a_failed_validate_run_after_the_matchups_has_a_back(self, app, tmp_path, monkeypatch):
+        self.failing_run(app, tmp_path, monkeypatch)
+        # the matchup run was over, and the report's run is what failed
+        app.run.args[:] = ["validate", "{}"]
+        assert get_json(app, "/api/state")[1]["run"]["back"] is True
+        assert post(app, "/api/back")[0] == 200
+        assert app.view == "units_table"
+
+    def test_there_is_no_back_unless_a_run_failed(self, app, tmp_path, monkeypatch):
+        self.failing_run(app, tmp_path, monkeypatch)
+        for status in ("finished", None):
+            app.status = status
+            assert get_json(app, "/api/state")[1]["run"]["back"] is False
+        app.status = "failed"
+        app.matchup_script_saved = True
+        assert get_json(app, "/api/state")[1]["run"]["back"] is False
+        app.matchup_script_saved = False
+        app.action = "validate"
+        assert get_json(app, "/api/state")[1]["run"]["back"] is False
+        assert app.view == "finished"
+
     def settings_stand_in(self, tmp_path):
         """A stand-in for the script, which asks whether the matchups are
         right, as matchup does, and says what it was given along with yes."""
@@ -5164,7 +5255,7 @@ class TestDemo:
         app.choose("matchup")
         assert get_json(app, "/api/state")[1]["demo"] is None
 
-    def test_the_demo_fills_in_the_recipes_window(self, app, fetched, runs):
+    def test_the_demo_picks_the_datasets_but_not_the_years(self, app, fetched, runs):
         app.choose("demo")
         post(app, "/api/demo_download", NORESM)
         to_setup(app)
@@ -5173,9 +5264,10 @@ class TestDemo:
         wait_for(lambda: app.view == "recipes")
         page = app.recipes_page
 
-        assert {name: page.form[name] for name in app_module.DEMO_RECIPE_SETTINGS} == (
-            app_module.DEMO_RECIPE_SETTINGS)
-        assert page.context["app"]["prefilled"] == list(app_module.DEMO_RECIPE_SETTINGS)
+        # the years are the user's to say
+        assert [page.form[name] for name in ("point_start", "point_end", "clim_start", "clim_end")] == [""] * 4
+        assert "prefilled" not in page.context["app"]
+        assert "initial_years" not in page.context["app"]
         # tos is the sea surface temperature, validated against COBE-SST 2
         temperature = next(row for row in page.rows if row["variable"] == "temperature")
         assert temperature["model_variable"] == "tos"
@@ -5187,7 +5279,7 @@ class TestDemo:
             assert [dataset["recipe"] for dataset in row["gridded"] if dataset["ticked"]] == ["woa23"]
         status, body = get(app, "/recipes/")
         assert status == 200
-        assert page_state(body)["context"]["app"]["prefilled"] == list(app_module.DEMO_RECIPE_SETTINGS)
+        assert "prefilled" not in page_state(body)["context"]["app"]
 
 
 def test_the_command_runs():
@@ -5204,14 +5296,21 @@ def test_the_command_runs():
     assert "--port" in result.stdout
 
 
-def test_the_files_skipped_start_with_restart(app, tmp_path):
-    """Restart files are not left out unasked: the window starts the files
-    skipped with them, for the user to remove."""
-    from oceanval import analysis_forms
+def test_the_files_skipped_start_empty(app, tmp_path):
+    """Nothing is left out unasked: the window starts the files skipped
+    empty, restart files included, and no default of OceanVal adds them."""
+    import inspect
 
-    assert app_module.default_setup_form()["exclude"] == "restart"
-    assert analysis_forms.default_setup_form(str(tmp_path))["exclude"] == "restart"
-    assert get_json(app, "/api/state")[1]["default_exclude"] == "restart"
+    from oceanval import analysis_forms, sim_compare_forms
+
+    assert app_module.default_setup_form()["exclude"] == ""
+    assert analysis_forms.default_setup_form(str(tmp_path))["exclude"] == ""
+    assert sim_compare_forms.blank_sim()["exclude"] == ""
+    assert "default_exclude" not in get_json(app, "/api/state")[1]
+    assert not hasattr(oceanval.create_recipes, "DEFAULT_EXCLUDE")
+    # nor do the Python functions start excluding anything
+    assert not inspect.signature(oceanval.matchup).parameters["exclude"].default
+    assert inspect.signature(oceanval.analyze).parameters["exclude"].default is None
     arguments, errors = check_setup(dict(SETUP_FORM, exclude="restart"), str(tmp_path))
     assert arguments["exclude"] == ["restart"]
     # removed, nothing is skipped
@@ -5219,9 +5318,9 @@ def test_the_files_skipped_start_with_restart(app, tmp_path):
 
 
 @pytest.mark.parametrize("tile", ["#home-viewer", "#home-analyze", "#home-validate"])
-def test_the_files_skipped_start_in_amber_in_a_browser(browser, tmp_path, tile):
-    """Validate, Analyze and View simulation output share the box: it starts with restart, said in
-    amber, until it is changed."""
+def test_the_files_skipped_start_empty_in_a_browser(browser, tmp_path, tile):
+    """Validate, Analyze and View simulation output share the box: it starts
+    empty, so nothing is skipped unless the user types it."""
     write_simulation(tmp_path / "sim", tracers=True)
     app = App(cwd=str(tmp_path))
     app.leftovers_asked = True
@@ -5234,17 +5333,48 @@ def test_the_files_skipped_start_in_amber_in_a_browser(browser, tmp_path, tile):
             page.click('button.choice[data-action="matchup_validate"]')
         amber = lambda: page.locator("#f-exclude").evaluate("node => node.classList.contains('is-detected')")
         page.wait_for_selector("#view-setup:not([hidden])")
-        page.wait_for_function("document.getElementById('f-exclude').value === 'restart'")
-        assert amber()
-        assert "Files with restart in their names are skipped. Remove restart to include them." in page.inner_text("#m-simulation")
+        assert page.input_value("#f-exclude") == ""
+        assert not amber()
+        assert "Only file names are checked" not in page.inner_text("#m-simulation")
         page.fill("#f-exclude", "restart 5d")
         assert not amber()
         assert "skipped. Remove restart" not in page.inner_text("#m-simulation")
         assert "Only file names are checked" in page.inner_text("#m-simulation")
         page.fill("#f-exclude", "")
         assert not amber()
-        page.fill("#f-exclude", "restart")
-        assert amber()
+    finally:
+        app.close()
+
+
+def test_required_tags_show_only_while_empty(browser, tmp_path):
+    """The red Required tag is there at the start and goes once the box is
+    filled (typed or written by a script), and comes back when it is emptied."""
+    write_simulation(tmp_path / "sim")
+    app = App(cwd=str(tmp_path))
+    app.choose("validate_menu")
+    url = app.start()
+    try:
+        page = browser.new_page()
+        page.goto(url)
+        page.click('button.choice[data-action="matchup"]')
+        page.wait_for_selector("#view-setup:not([hidden])")
+        tag = page.locator('label[for="f-ndown"] .own-req')
+        simdir = page.locator('label[for="f-simdir"] .own-req')
+        domain = page.locator("#setup-domain legend .own-req")
+        assert tag.is_visible() and simdir.is_visible() and domain.is_visible()
+        page.fill("#f-simdir", str(tmp_path / "sim"))
+        page.wait_for_selector('label[for="f-simdir"] .own-req', state="hidden")
+        assert tag.is_visible()
+        # a value written by a script fires no event
+        page.evaluate("document.getElementById('f-ndown').value = '0'")
+        page.wait_for_selector('label[for="f-ndown"] .own-req', state="hidden")
+        page.fill("#f-simdir", "")
+        page.wait_for_selector('label[for="f-simdir"] .own-req', state="visible")
+        # the tag stays in the page: only its display changes
+        assert page.locator('label[for="f-ndown"]').text_content().strip().endswith("Required")
+        # a group of choices is filled once one is chosen
+        page.locator("#f-domain > *").first.click()
+        page.wait_for_selector("#setup-domain legend .own-req", state="hidden")
     finally:
         app.close()
 
@@ -5284,20 +5414,13 @@ def test_the_window_in_a_browser(browser, tmp_path, monkeypatch):
         assert page.locator("#steps").count() == 0
         assert page.is_hidden("#title")
         page.click('button.choice[data-action="matchup"]')
-        page.wait_for_function(
-            "document.querySelector('#title').textContent === 'What kind of datasets do you want to use for validation?'"
-        )
-        # after it, the title is at the top right, level with the name
-        name, title = page.locator(".brand__word").bounding_box(), page.locator("#title").bounding_box()
-        assert title["x"] > name["x"] + name["width"]
-        assert title["y"] < name["y"] + name["height"]
-        assert page.text_content("#title") == "What kind of datasets do you want to use for validation?"
+        page.wait_for_selector("#view-setup:not([hidden])")
+        # the setup page has no title: the boxes say what they ask
+        assert page.is_hidden("#title")
         assert page.locator("#m-domain").count() == 0
-        assert page.locator("#title").evaluate("node => getComputedStyle(node).whiteSpace") == "nowrap"
         assert "OceanVal is running from" not in page.text_content("#meta")
         assert "Next, OceanVal reads the simulation, and shows you what it found." not in page.text_content("#bar")
         page.set_viewport_size({"width": 390, "height": 844})
-        assert page.locator("#title").evaluate("node => getComputedStyle(node).whiteSpace") == "normal"
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         page.set_viewport_size({"width": 1280, "height": 720})
         assert page.locator(".ndown-row").evaluate(
@@ -5553,7 +5676,7 @@ def test_the_files_are_found_in_a_box_with_no_title(browser, tmp_path):
         assert page.is_hidden("#run")
         go.write_text("")
         page.wait_for_selector("#review:not([hidden])", timeout=60000)
-        assert page.text_content("#title") == "Identify simulations files for validating variables"
+        assert page.text_content("#title") == ""
         assert page.is_hidden("#run")
     finally:
         app.close()
@@ -5631,7 +5754,7 @@ def test_a_saved_matchup_script_opens_run_instructions(browser, tmp_path):
         page = browser.new_page()
         page.goto(url)
         page.wait_for_selector("#review:not([hidden])")
-        assert page.text_content("#title") == "Identify simulations files for validating variables"
+        assert page.text_content("#title") == ""
         # the window does not offer to store the script, but an answer of "save" still does
         assert page.locator("#actions button:has-text('store')").count() == 0
         question = get_json(app, "/api/state")[1]["question"]
@@ -5666,7 +5789,7 @@ def test_the_point_time_res_step_in_a_browser(browser, tmp_path):
 
         page.click("text=Yes, continue")
         page.wait_for_selector("#view-point-time-res:not([hidden])")
-        # OceanVal's suggestion for all of them, in red and bold
+        # OceanVal's suggestion for all of them, in bold
         assert page.is_checked("#ptr-mode-all")
         assert page.input_value("#ptr-all") == "year,month"
         assert "is-oceanval" in page.get_attribute("#ptr-all", "class")
@@ -5701,7 +5824,7 @@ def test_the_time_shift_question_in_a_browser(browser, tmp_path):
 
         assert page.is_hidden("#review") and page.is_hidden("#ask")
         assert page.text_content("#title") == "Are the model's times at the end of each mean?"
-        # OceanVal's suggestion, in red and bold
+        # OceanVal's suggestion, in bold
         assert page.is_checked("#ts-mode-shift")
         assert page.text_content("#ts-shift-label") == "Shift the simulation's times back one day"
         label = page.locator("#ts-shift-label")
@@ -5797,14 +5920,16 @@ def test_the_report_options_in_a_browser(browser, tmp_path, monkeypatch):
         through_output(page)
         page.wait_for_selector("#view-validate:not([hidden])")
 
-        assert page.text_content("#title") == "One last thing... How would you like your validation report?"
+        assert page.text_content("#title") == ""
         assert page.locator("#title").evaluate("node => getComputedStyle(node).whiteSpace") == "nowrap"
         # the matchups and the report go where the output step said
         assert page.is_hidden("#v-group-data_dir")
         assert page.is_hidden("#v-group-out_dir")
         assert page.text_content("#v-report-dir") == (
-            "Nothing is matched up until you carry on. The report is built in "
-            f"oceanval_report, beside the matchups, in {tmp_path}."
+            f"Matchups will be stored here: {tmp_path}/oceanval_matchups"
+            f"An interim validation report will be viewable here: {tmp_path}/oceanval_interim_report"
+            "/oceanval_report/_build/html/notebooks/summary.html"
+            f"The final validation report will be viewable here: {tmp_path}/oceanval_report.html"
         )
         assert page.evaluate("document.activeElement.id") == "v-lon_min"
         assert page.text_content("#build") == "Match up and validate"
@@ -6252,7 +6377,7 @@ def test_a_transect_in_a_browser(browser, tmp_path, monkeypatch):
         assert page.is_disabled("#build")
         assert page.get_attribute("#build", "title") == "Fill in both ends of the transect, or untick it"
 
-        # a diagonal line is refused, in red and bold, and every box is marked
+        # a diagonal line is refused, in bold, and every box is marked
         for name, value in [("start_lon", "-30"), ("start_lat", "0"), ("end_lon", "-20"), ("end_lat", "65")]:
             page.fill(f"#v-transect_{name}", value)
         problem = page.locator("#vm-transect .group__line")
@@ -6434,7 +6559,7 @@ def test_depth_bins_in_a_browser(browser, tmp_path, monkeypatch):
 def test_the_demo_in_a_browser(browser, tmp_path, fetched):
     """The demo is offered below the four, says in large bold type that it
     makes oceanval_demo, says what it is not, and fills in the simulation
-    step in red and bold."""
+    step in bold."""
     app = App(cwd=str(tmp_path))
     app.choose("validate_menu")
     app.leftovers_asked = True
@@ -6559,7 +6684,7 @@ def test_comparing_validations_in_a_browser(browser, tmp_path, monkeypatch):
         page.fill("#c-dir_2", "nowhere")
         assert page.is_enabled("#compare")
 
-        # what cannot be used is said in red and bold, beside the row
+        # what cannot be used is said in bold, beside the row
         page.click("#compare")
         page.wait_for_selector("#cm-rows.is-error")
         problem = page.locator("#cm-rows .group__line.is-error")
@@ -6603,6 +6728,9 @@ def test_the_output_is_only_shown_when_a_run_fails(browser, tmp_path):
         page.wait_for_selector("#run:not([hidden])")
         assert page.is_hidden("#progress")
         assert "matching up" in page.text_content("#console-text")
+        # Quit and Start again are always there; Back only when the choices to go back to are kept
+        page.wait_for_selector("#bar button:has-text('Start again')")
+        assert page.locator("#bar button:has-text('Back')").count() == 0
     finally:
         app.close()
 
@@ -7123,7 +7251,7 @@ def test_no_files_in_the_simulation_is_red_bold_and_large(browser, tmp_path):
     ],
 )
 def test_the_directories_down_are_filled_in_from_the_layout(browser, tmp_path, layout, depth, text):
-    """An amber suggestion, which the user's own value is never replaced by."""
+    """Told once in a pop-out, with the box in bold; the user's own value is never replaced by it."""
     write_folders(tmp_path / "sim", layout)
     write_simulation(tmp_path / "other")
     app = App(cwd=str(tmp_path))
@@ -7131,6 +7259,7 @@ def test_the_directories_down_are_filled_in_from_the_layout(browser, tmp_path, l
     url = app.start()
     try:
         page = browser.new_page()
+        page.add_init_script("window.__keepFolderStructure = true")
         page.goto(url)
         page.click('button.choice[data-action="matchup"]')
         page.fill("#f-simdir", "sim")
@@ -7138,25 +7267,29 @@ def test_the_directories_down_are_filled_in_from_the_layout(browser, tmp_path, l
         ndown = page.locator("#f-ndown")
         assert ndown.evaluate("node => node.classList.contains('is-detected')")
         assert not ndown.evaluate("node => node.classList.contains('is-oceanval')")
-        # amber (the --amber token), not red
-        assert ndown.evaluate("node => getComputedStyle(node).fontWeight") == "600"
+        # bold, no longer amber (the pop-out tells it instead)
+        assert ndown.evaluate("node => getComputedStyle(node).fontWeight") == "700"
         assert ndown.evaluate("node => getComputedStyle(node).color") != "rgb(192, 57, 43)"
-        line = page.locator("#ndown-layout .group__line.is-detected")
-        line.wait_for()
-        assert line.text_content() == f"Folder structure was identified as {text}"
+        assert page.locator("#ndown-layout").count() == 0
+        popout = page.locator("#folder-structure")
+        popout.wait_for(state="visible")
+        assert popout.inner_text().count("It looks like the folder structure is " + text) == 1
+        assert f"the number of directories down is assumed to be {depth}. Change it if this is not correct." in popout.inner_text()
+        page.click("#folder-structure-continue")
+        assert popout.is_hidden()
         # the files at that depth are counted
         page.wait_for_function("document.querySelector('#ndown-found').textContent.includes('netCDF file')")
         # a directory without the layout empties what OceanVal filled in
         page.fill("#f-simdir", "other")
         page.wait_for_function("document.querySelector('#f-ndown').value === ''")
-        assert page.locator("#ndown-layout .group__line.is-detected").count() == 0
+        assert popout.is_hidden()
         # a value typed is the user's: it stays, with no suggestion shown
         page.fill("#f-ndown", "3")
         page.fill("#f-simdir", "sim")
         page.wait_for_timeout(1000)
         assert page.input_value("#f-ndown") == "3"
         assert not ndown.evaluate("node => node.classList.contains('is-detected')")
-        assert page.locator("#ndown-layout .group__line.is-detected").count() == 0
+        assert popout.is_hidden()
     finally:
         app.close()
 
@@ -7218,13 +7351,12 @@ def test_the_preferences_and_info_are_on_the_fine_tune_page(browser, oceanvalrc,
 
         page.click("#settings-open")
         assert page.is_visible("#preferences")
-        page.click('label.theme-option:has(input[value="dark"])')
+        page.uncheck("#settings-show-demo")
         page.click("#settings-apply")
         page.wait_for_selector("#preferences", state="hidden")
-        assert page.get_attribute("html", "data-theme") == "dark"
         # saved through the app, which keeps it for its other pages
-        assert app.state()["user_settings"]["values"]["theme"] == "dark"
-        assert json.loads(oceanvalrc.read_text())["settings"]["theme"] == "dark"
+        assert app.state()["user_settings"]["values"]["show_demo"] is False
+        assert json.loads(oceanvalrc.read_text())["settings"]["show_demo"] is False
 
         page.click("#info-open")
         assert page.is_visible("#info")
@@ -7292,11 +7424,11 @@ def test_finding_key_information_in_a_browser(browser, tmp_path):
 @pytest.mark.parametrize("action", ["matchup", "matchup_validate"])
 def test_what_is_done_with_existing_matchups_must_be_said(browser, tmp_path, monkeypatch, action):
     """In the output step, once the matchups are confirmed, a grid of the
-    matchups there already: each to be used (as each is to start with), or
-    replaced, if this run matches it up, or ignored, left out of the report,
-    if it does not (asked about only if a report follows), with a tick at the
-    top of each column to choose it for every row that has it; what is chosen
-    must be confirmed, as each starts on use."""
+    matchups there already: each to be replaced, if this run matches it up
+    (to start with), used, or ignored, left out of the report, if it does not
+    (asked about only if a report follows; used to start with), with a tick at
+    the top of each column to choose it for every row that has it; what is
+    chosen must be confirmed, as they may not notice what each starts on."""
     write_simulation(tmp_path / "sim")
     write_mixed_matchups(tmp_path / "old")
     # a stand-in for the script, which makes the gridded COBE2 temperature only
@@ -7365,9 +7497,8 @@ def test_what_is_done_with_existing_matchups_must_be_said(browser, tmp_path, mon
 
         page.fill("#f-out_dir", "old")
         page.wait_for_selector("#row-existing:not([hidden])")
-        warning = page.locator("#m-out_dir .group__line.is-warn")
-        assert warning.text_content() == "There are matchups here already, from an earlier run. Choose another directory if you need to keep them apart."
-        assert warning.evaluate("node => getComputedStyle(node).color") == "rgb(184, 83, 47)"
+        # the grid says it; the directory box has no warning of its own
+        assert page.locator("#m-out_dir .group__line.is-warn").count() == 0
         assert page.text_content("#existing-title") == "What do you want to do with existing matchups? Required"
         # confirming what is chosen is required, report or not
         assert page.is_visible("#existing-required")
@@ -7385,12 +7516,15 @@ def test_what_is_done_with_existing_matchups_must_be_said(browser, tmp_path, mon
         assert offered() == [["use", "replace" if key in made_keys else "ignore"] for key in rows]
         intro = page.text_content("#existing-intro")
         assert ("Replace: it is one this run matches up" in intro) and (("Ignore:" in intro) == report)
-        # each is used to start with
-        assert choices() == [["use"]] * len(rows)
-        assert tops() == ["use"]
+        # those the run makes are replaced to start with, the others used
+        assert choices() == [["replace" if key in made_keys else "use"] for key in rows]
+        assert tops() == ["replace"]
         assert page.is_disabled("#output-run")
 
         # one option a row, and one at the top chooses it for every row that has it
+        page.check("#existing-all-use")
+        assert choices() == [["use"]] * len(rows)
+        assert tops() == ["use"]
         page.check("#existing-all-replace")
         assert choices() == [["replace" if key in made_keys else "use"] for key in rows]
         assert "replace" in tops()
@@ -7551,7 +7685,7 @@ def test_the_demo_grid_in_a_browser(browser, tmp_path, fetched):
 
 def test_the_units_step_in_a_browser(browser, tmp_path, monkeypatch):
     """The table lists the units of each matchup with the conversion OceanVal
-    fills in where they differ, in red and bold for as long as it is OceanVal's,
+    fills in where they differ, in bold for as long as it is OceanVal's,
     the units have to be confirmed to carry on, a conversion that is not a
     number is marked, and those that are go into the script."""
     write_simulation(tmp_path / "sim", tracers=True)
@@ -7845,7 +7979,7 @@ def test_going_back_keeps_what_was_entered_in_a_browser(browser, tmp_path, monke
 
 def test_the_recipes_window_after_the_simulation_changes_in_a_browser(browser, tmp_path):
     """What OceanVal could not keep of what the window held, once the
-    simulation is read again, is said in red and bold."""
+    simulation is read again, is said in bold."""
     write_simulation(tmp_path / "sim", tracers=True)
     # temperature only
     write_simulation(tmp_path / "other")
@@ -7891,7 +8025,7 @@ def test_the_recipes_window_after_the_simulation_changes_in_a_browser(browser, t
 
 
 def test_clearing_every_selection_in_a_browser(browser, tmp_path):
-    """Clear all selections unticks every dataset, and is then disabled until
+    """Deselect all unticks every dataset, and is then disabled until
     one is ticked again."""
     write_simulation(tmp_path / "sim")
     app = App(cwd=str(tmp_path))
@@ -8028,34 +8162,33 @@ def test_picking_the_variables_of_your_own_data_in_a_browser(browser, tmp_path):
         page.wait_for_selector("#own-form-point")
 
         # the simulation's variables, searched by name or long_name
-        pick = page.locator("#o-point-model_variable-pick")
-        pick.locator("summary").wait_for()
-        pick.locator("summary").click()
-        page.fill("#o-point-model_variable-pick .vars__search", "potential temp")
-        pick.locator('input[aria-label="Use thetao"]').check()
+        shown = lambda: page.evaluate("() => [...document.querySelectorAll('.vars__popover:not([hidden]) tbody tr:not([hidden])')].map((row) => row.cells[1].textContent)")
+        page.wait_for_function("document.querySelector('#o-point-model_variable-pick').innerText.includes('Click in the box')")
+        page.fill("#o-point-model_variable", "potential temp")
+        assert shown() == ["thetao"]
+        page.locator(".vars__popover:not([hidden]) tbody tr:not([hidden])").first.click()
         assert page.input_value("#o-point-model_variable") == "thetao"
         page.click("#own-next")
         page.wait_for_selector("#own-form-gridded")
 
-        # the same picker on the gridded step, where the box is typed in too
-        page.locator("#o-gridded-model_variable-pick summary").click()
-        page.locator('#o-gridded-model_variable-pick input[aria-label="Use thetao"]').check()
-        assert page.input_value("#o-gridded-model_variable") == "thetao"
+        # the same on the gridded step, where several are summed with +
+        page.wait_for_function("document.querySelector('#o-gridded-model_variable-pick').innerText.includes('Click in the box')")
+        page.fill("#o-gridded-model_variable", "thetao+")
+        assert "thetao" in shown()
         page.fill("#o-gridded-model_variable", "")
-        page.wait_for_function("!document.querySelector('#o-gridded-model_variable-pick input[aria-label=\"Use thetao\"]').checked")
 
         # nothing to pick from until there are observations
         assert page.locator("#o-gridded-obs_variable-pick").inner_text() == ""
         page.fill("#o-gridded-obs_path", "obs")
         picker = page.locator("#o-gridded-obs_variable-pick")
-        picker.locator("summary").wait_for()
+        page.wait_for_function("document.querySelector('#o-gridded-obs_variable-pick').innerText.includes('click in the box')")
         assert "variables in obs_2011.nc, the first of 2 files" in picker.inner_text()
-        picker.locator("summary").click()
-        page.fill("#o-gridded-obs_variable-pick .vars__search", "attenuation")
-        picker.locator('input[aria-label="Use kd490"]').check()
+        page.fill("#o-gridded-obs_variable", "attenuation")
+        assert shown() == ["kd490"]
+        page.locator(".vars__popover:not([hidden]) tbody tr:not([hidden])").first.click()
         assert page.input_value("#o-gridded-obs_variable") == "kd490"
         # one is chosen, and the list closes
-        assert not picker.locator("details").evaluate("node => node.open")
+        assert shown() == []
 
         # a path with no data says so, and an address is not looked at
         page.fill("#o-gridded-obs_path", "nowhere")
@@ -8578,35 +8711,33 @@ class TestSettings:
     """The window's settings, saved in the home .oceanvalrc from its panel."""
 
     def test_the_settings_are_read_as_the_window_opens(self, oceanvalrc, tmp_path):
-        oceanvalrc.write_text(json.dumps({"settings": {"theme": "blue", "show_demo": False}}))
+        oceanvalrc.write_text(json.dumps({"settings": {"show_demo": False}}))
         app = App(cwd=str(tmp_path))
         settings = app.state()["user_settings"]
-        assert settings["values"] == {"theme": "blue", "show_demo": False, **NO_STORE}
+        assert settings["values"] == {"show_demo": False, **NO_STORE}
         assert settings["path"] == str(oceanvalrc)
-        assert [key for key, _label in settings["themes"]] == ["default", "dark", "silver", "blue"]
+        assert "themes" not in settings
 
     def test_applying_saves_them(self, app, oceanvalrc):
         version = app.version
-        status, reply = post(app, "/api/settings", {"settings": {"theme": "dark", "show_demo": False}})
+        status, reply = post(app, "/api/settings", {"settings": {"show_demo": False}})
         assert status == 200
         assert reply["ok"] is True
-        assert reply["settings"] == {"theme": "dark", "show_demo": False, **NO_STORE}
+        assert reply["settings"] == {"show_demo": False, **NO_STORE}
         assert reply["data_store"]["root"] is None
-        assert app.state()["user_settings"]["values"] == {"theme": "dark", "show_demo": False, **NO_STORE}
+        assert app.state()["user_settings"]["values"] == {"show_demo": False, **NO_STORE}
         assert app.version > version
-        assert json.loads(oceanvalrc.read_text())["settings"] == {"theme": "dark", "show_demo": False}
-        # and the page is in its colours from then on
-        assert '<html lang="en" data-theme="dark">' in get(app, "/")[1]
+        assert json.loads(oceanvalrc.read_text())["settings"] == {"show_demo": False}
 
     def test_settings_that_cannot_be_used_are_refused(self, app, oceanvalrc):
-        status, reply = post(app, "/api/settings", {"settings": {"theme": "purple"}})
+        status, reply = post(app, "/api/settings", {"settings": {"show_demo": "purple"}})
         assert status == 400
         assert not reply["ok"] and "purple" in reply["error"]
-        assert app.state()["user_settings"]["values"] == {"theme": "default", "show_demo": True, **NO_STORE}
+        assert app.state()["user_settings"]["values"] == {"show_demo": True, **NO_STORE}
         assert not oceanvalrc.exists()
 
     def test_applying_needs_the_token(self, app, oceanvalrc):
-        assert post(app, "/api/settings", {"settings": {"theme": "dark"}}, token="wrong")[0] == 403
+        assert post(app, "/api/settings", {"settings": {"show_demo": False}}, token="wrong")[0] == 403
         assert not oceanvalrc.exists()
 
     def test_the_settings_panel_in_a_browser(self, browser, oceanvalrc, tmp_path):
@@ -8617,55 +8748,42 @@ class TestSettings:
             page = browser.new_page()
             page.goto(url)
             page.wait_for_selector("#view-start:not([hidden])")
-            assert page.get_attribute("html", "data-theme") is None
             assert page.is_visible("#choice-demo")
 
             # Cancel leaves everything as it was
             page.click("#settings-open")
             assert page.is_visible("#preferences")
             assert page.is_checked("#settings-show-demo")
-            assert page.is_checked('input[name="settings-theme"][value="default"]')
-            page.check('input[name="settings-theme"][value="dark"]')
             page.uncheck("#settings-show-demo")
             page.click("#settings-cancel")
             assert page.is_hidden("#preferences")
-            assert page.get_attribute("html", "data-theme") is None
             assert page.is_visible("#choice-demo")
             assert not oceanvalrc.exists()
             assert page.evaluate("document.activeElement.id") == "settings-open"
 
             # opened again, it shows what is saved, not what was cancelled
             page.click("#settings-open")
-            assert page.is_checked('input[name="settings-theme"][value="default"]')
             assert page.is_checked("#settings-show-demo")
             page.keyboard.press("Escape")
             assert page.is_hidden("#preferences")
 
             page.click("#settings-open")
-            page.click('label.theme-option:has(input[value="dark"])')
-            assert page.is_checked('input[name="settings-theme"][value="dark"]')
             page.uncheck("#settings-show-demo")
             page.click("#settings-apply")
             page.wait_for_selector("#preferences", state="hidden")
-            assert page.get_attribute("html", "data-theme") == "dark"
             assert page.is_hidden("#choice-demo")
-            assert json.loads(oceanvalrc.read_text())["settings"] == {"theme": "dark", "show_demo": False, **NO_STORE}
-            # the page's own colours follow
-            assert page.evaluate("getComputedStyle(document.body).backgroundColor") == "rgb(13, 26, 31)"
+            assert json.loads(oceanvalrc.read_text())["settings"] == {"show_demo": False}
 
             # and are there when the page is opened again
             page.reload()
             page.wait_for_selector("#view-start:not([hidden])")
-            assert page.get_attribute("html", "data-theme") == "dark"
             assert page.is_hidden("#choice-demo")
 
             # back to the default
             page.click("#settings-open")
-            page.check('input[name="settings-theme"][value="default"]')
             page.check("#settings-show-demo")
             page.click("#settings-apply")
             page.wait_for_selector("#preferences", state="hidden")
-            assert page.get_attribute("html", "data-theme") is None
             assert page.is_visible("#choice-demo")
             assert page.evaluate("getComputedStyle(document.body).backgroundColor") == "rgb(244, 250, 250)"
         finally:
@@ -8848,12 +8966,11 @@ class TestSettings:
             # a file that cannot be read is not written over
             oceanvalrc.write_text("{ not json")
             page.click("#settings-open")
-            page.check('input[name="settings-theme"][value="blue"]')
+            page.uncheck("#settings-show-demo")
             page.click("#settings-apply")
             page.wait_for_selector("#settings-error:not([hidden])")
             assert "could not be read" in page.text_content("#settings-error")
             assert page.is_visible("#preferences")
-            assert page.get_attribute("html", "data-theme") is None
             assert oceanvalrc.read_text() == "{ not json"
         finally:
             app.close()
@@ -8870,10 +8987,14 @@ class TestInfo:
         assert [row["point"] for row in rows].count(True) == len(POINT_RECIPE_CATALOGUE)
         for row in rows:
             assert row["variable"] and row["recipe"] and row["dataset"] and row["units"]
-        woa = next(r for r in rows if (r["variable"], r["recipe"]) == ("Nitrate", "woa23"))
+        woa = next(
+            r for r in rows if (r["variable"], r["recipe"]) == ("Nitrate concentration in sea water", "woa23")
+        )
         assert woa["dataset"] == "World Ocean Atlas 2023" and woa["water_column"]
         assert woa["url"].startswith("https://")
-        glodap = next(r for r in rows if r["recipe"] == "glodap" and r["variable"] == "Alkalinity")
+        glodap = next(
+            r for r in rows if r["recipe"] == "glodap" and r["variable"] == "Total alkalinity of sea water"
+        )
         assert not glodap["water_column"] and glodap["region"] == "Global"
         nsbc = next(r for r in rows if r["recipe"] == "nsbc")
         assert nsbc["dataset"] == "North Sea Biogeochemical Climatology"
@@ -8917,7 +9038,8 @@ class TestInfo:
             assert page.is_hidden("#restart-confirm")
             page.click("#restart-open")
             assert page.is_visible("#restart-confirm")
-            assert page.is_hidden("#restart-stopping")
+            assert page.text_content("#restart-title") == "Begin again with a clean slate"
+            assert page.locator("#restart-confirm .restart__body *").count() == 1
             assert page.evaluate("document.activeElement.id") == "restart-cancel"
             # Cancel and Escape change nothing
             page.click("#restart-cancel")

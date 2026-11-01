@@ -197,14 +197,36 @@ def _thin(data, limit):
     return data.isel({dim: slice(None, None, stride) for dim in data.dims}), stride
 
 
-def coastline_scale(lon, lat):
-    """ncplot's get_coastline: the resolution of the coastline for an extent."""
+def coastline_scale(lon, lat, values=None):
+    """ncplot's get_coastline: the resolution of the coastline for an extent:
+    that of the cells with values, if values (of the same shape) are given."""
+    lon, lat = np.asarray(lon, dtype="float64"), np.asarray(lat, dtype="float64")
+    if values is not None:
+        valid = np.isfinite(np.asarray(values, dtype="float64"))
+        if valid.shape == lon.shape == lat.shape and valid.any():
+            lon, lat = lon[valid], lat[valid]
     area = (np.nanmax(lon) - np.nanmin(lon)) * (np.nanmax(lat) - np.nanmin(lat)) / 360**2
     if area < 0.0016:
         return "10m"
     if area < 0.25:
         return "50m"
     return "110m"
+
+
+def _without_grid_mapping(data):
+    """data without what rioxarray reads a crs from: a grid_mapping attribute
+    or encoding, and the coordinates of a crs (spatial_ref, crs)."""
+    data = data.drop_vars([key for key in data.coords if key in ("spatial_ref", "crs")])
+    data = data.copy()
+    data.attrs = {key: value for key, value in data.attrs.items() if key != "grid_mapping"}
+    data.encoding = {key: value for key, value in data.encoding.items() if key != "grid_mapping"}
+    # rioxarray (newer versions look in more places) must find no crs: a coordinate's attributes
+    # (crs_wkt, spatial_ref, grid_mapping) and encoding go too
+    for name in data.coords:
+        data[name].attrs = {key: value for key, value in data[name].attrs.items()
+                            if key not in ("grid_mapping", "crs_wkt", "spatial_ref", "crs")}
+        data[name].encoding = {key: value for key, value in data[name].encoding.items() if key != "grid_mapping"}
+    return data
 
 
 def mesh_image(data, about, mesh):
@@ -290,7 +312,15 @@ def map_plot(data, about, name, cmap=None, vmin=None, vmax=None, log=False, coas
     if coast and lon is not None and not on_mesh and not geographic:
         notes.append("Coastlines need cartopy and geoviews installed.")
     if geographic:
-        options.update(geo=True, coastline=coastline_scale(data[x].values, data[y].values))
+        # the extent of the cells with values: a grid can have cells far from the domain (NEMO's at -1, -1)
+        lon_cells = data[x].broadcast_like(data).transpose(*data.dims).values
+        lat_cells = data[y].broadcast_like(data).transpose(*data.dims).values
+        # the axes are longitudes and latitudes: say so, and hide any grid mapping from rioxarray, whose
+        # crs hvplot would use instead of this one (and geoviews refuses a crs unlike its coastline's)
+        import cartopy.crs as ccrs
+
+        data = _without_grid_mapping(data)
+        options.update(geo=True, crs=ccrs.PlateCarree(), coastline=coastline_scale(lon_cells, lat_cells, data.values))
     else:
         options.update(xlabel=x, ylabel=y)
         if cartesian:
@@ -299,10 +329,19 @@ def map_plot(data, about, name, cmap=None, vmin=None, vmax=None, log=False, coas
             options.update(xlabel="Longitude", ylabel="Latitude")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        if kind == "quadmesh":
-            plot = data.hvplot.quadmesh(**options)
-        else:
-            plot = data.hvplot.image(**options)
+        draw = data.hvplot.quadmesh if kind == "quadmesh" else data.hvplot.image
+        try:
+            plot = draw(**options)
+        except ValueError as problem:
+            # geoviews refusing a crs that is not its coastline's: draw the map without the coastline
+            if not (geographic and "coordinate reference system" in str(problem)):
+                raise
+            for key in ("geo", "crs", "coastline"):
+                options.pop(key)
+            options.update(xlabel="Longitude", ylabel="Latitude")
+            notes.append("The coastline could not be drawn over this map.")
+            geographic = False
+            plot = draw(**options)
         if coast and on_mesh:
             line, coast_notes = mesh_coastline(mesh, x, y)
             if line is not None:

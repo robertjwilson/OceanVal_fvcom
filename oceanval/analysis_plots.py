@@ -29,12 +29,13 @@ import re
 import warnings
 
 import matplotlib.pyplot as plt
-import nctoolkit as nc
+from oceanval.quiet_nc import nc
 import numpy as np
 import pandas as pd
 import xarray as xr
 from matplotlib.colors import to_hex
 
+from oceanval import extent
 from oceanval.analysis import PEAK_DAY, PEAK_VALUE, load
 from oceanval.map_land import LAND_CODE
 from oceanval.tidiers import fix_unit
@@ -180,7 +181,9 @@ def script(drawn, title=None):
 
 # ---- the maps ----
 
-MAP_IMPORTS = "import matplotlib.pyplot as plt\nimport nctoolkit as nc\n"
+# nctoolkit is imported quietly in the copied scripts too (they do not import oceanval)
+NC_IMPORT = "import warnings\nwith warnings.catch_warnings():\n    warnings.simplefilter(\"ignore\")\n    import nctoolkit as nc\n"
+MAP_IMPORTS = "import matplotlib.pyplot as plt\n" + NC_IMPORT
 
 
 def _lon_lat(path):
@@ -192,14 +195,25 @@ def _lon_lat(path):
         return np.asarray(ds[lon].values, dtype="float64"), np.asarray(ds[lat].values, dtype="float64")
 
 
+def _valid_lon_lat(path):
+    """The longitudes and latitudes of the cells of the field in path that have
+    values (see oceanval.extent), or of the whole grid if they can not be told:
+    a grid can have cells far from the model's domain (NEMO's at lon -1, lat -1)."""
+    with xr.open_dataset(path, decode_times=False) as ds:
+        found = extent.valid_lonlat(ds)
+    return found if found is not None else _lon_lat(path)
+
+
 def _plot_grid(path):
     """The regular lon-lat grid to draw the grid in path on, as to_latlon's
-    lon, lat and res: covering it, at about its own resolution, but no finer
-    than 1/20 degree or more than 1440 cells across."""
+    lon, lat and res: covering its cells with values, at about its own
+    resolution, but no finer than 1/20 degree or more than 1440 cells across."""
     lon, lat = _lon_lat(path)
     lon = np.where(lon > 180, lon - 360, lon)
-    lon_min, lon_max = float(np.nanmin(lon)), float(np.nanmax(lon))
-    lat_min, lat_max = float(np.nanmin(lat)), float(np.nanmax(lat))
+    valid_lon, valid_lat = _valid_lon_lat(path)
+    valid_lon = np.where(valid_lon > 180, valid_lon - 360, valid_lon)
+    lon_min, lon_max = float(np.nanmin(valid_lon)), float(np.nanmax(valid_lon))
+    lat_min, lat_max = float(np.nanmin(valid_lat)), float(np.nanmax(valid_lat))
     if lon.ndim == 2 and lon.shape[1] > 1:
         spacing = np.nanmedian(np.abs(np.diff(lon, axis=1)))
     elif lon.size > 1:
@@ -308,14 +322,22 @@ def _panel_size(path, panels, ncol=None, bar_rows=0):
     for all the maps, or, with bar_rows, one below each of that many rows."""
     ncol = ncol or (4 if panels > 3 else panels)
     nrow = int(np.ceil(panels / ncol))
-    lon, lat = _lon_lat(path)
-    lon = np.where(lon > 180, lon - 360, lon)
-    lon_span, lat_span = float(np.nanmax(lon) - np.nanmin(lon)), float(np.nanmax(lat) - np.nanmin(lat))
-    if lon_span > 340 and lat_span > 160:
-        aspect = 2.0
+    try:
+        lon, lat = _valid_lon_lat(path)
+    except StopIteration:
+        # a mesh in metres has no longitudes and latitudes: its x and y give its shape
+        with xr.open_dataset(path, decode_times=False) as ds:
+            x, y = np.asarray(ds["x"].values, dtype="float64"), np.asarray(ds["y"].values, dtype="float64")
+        y_span = float(np.nanmax(y) - np.nanmin(y))
+        aspect = (float(np.nanmax(x) - np.nanmin(x)) / y_span) if y_span > 0 else 1.5
     else:
-        mid_lat = 0.5 * float(np.nanmax(lat) + np.nanmin(lat))
-        aspect = lon_span * np.cos(np.radians(mid_lat)) / lat_span if lat_span > 0 else 1.5
+        lon = np.where(lon > 180, lon - 360, lon)
+        lon_span, lat_span = float(np.nanmax(lon) - np.nanmin(lon)), float(np.nanmax(lat) - np.nanmin(lat))
+        if lon_span > 340 and lat_span > 160:
+            aspect = 2.0
+        else:
+            mid_lat = 0.5 * float(np.nanmax(lat) + np.nanmin(lat))
+            aspect = lon_span * np.cos(np.radians(mid_lat)) / lat_span if lat_span > 0 else 1.5
     aspect = min(max(float(aspect), 0.6), 2.5)
     map_width = (PANEL_WIDTH - (0.4 if bar_rows else 1.6)) / ncol
     return [PANEL_WIDTH, round(nrow * (map_width / aspect + 0.55) + 0.9 * bar_rows + 0.3, 1)]
@@ -339,7 +361,7 @@ def _panel_draw(key, label, font, colours=None, with_calendar=False):
         draw = 'with plt.rc_context({"font.size": font_size}):\n' + "\n".join("    " + line for line in call.split("\n"))
     else:
         # nctoolkit before 1.3.2 has no panel_plot: a grid of pub_plots
-        imports = lead + "import matplotlib.pyplot as plt\nimport nctoolkit as nc\nimport numpy as np\n"
+        imports = lead + "import matplotlib.pyplot as plt\n" + NC_IMPORT + "import numpy as np\n"
         options = {"var": key, "limits": _Code("limits"), "title": _Code("title"), "legend": label,
                    "fig": _Code("fig"), "gs": _Code("grid[index // ncol, index % ncol]")}
         if colours:

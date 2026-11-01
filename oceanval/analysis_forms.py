@@ -29,11 +29,19 @@ _NOT_ANALYZED = ("domain", "start", "end")
 def default_setup_form(cwd):
     """The simulation step's boxes for an analysis, as they start. Its out_dir,
     out and replace_analysis are the last page's, which starts with them."""
-    from oceanval.app import default_setup_form as setup_form
+    from oceanval.app import default_setup_form as setup_form, free_name
 
     # replace_analysis: whether the user has ticked to replace the analysis
     # the output directory has already, which it must have if it does
-    return dict(setup_form(), out_dir=cwd, out="analysis.py", replace_analysis=False)
+    # out is analysis.py, or the first of analysis1.py... that is free in cwd; out_typed
+    # is whether the user typed it, the only name warned of if the file exists
+    return dict(
+        setup_form(),
+        out_dir=cwd,
+        out=free_name(cwd, "analysis"),
+        out_typed=False,
+        replace_analysis=False,
+    )
 
 
 def check_setup(form, cwd):
@@ -225,6 +233,8 @@ def check_rows(rows, found, time_res_of=analysis.stream_time_res):
                     "files": list(stream["files"]),
                     "time_res": res,
                     "streams": len(holding),
+                    # raw FVCOM output, worked out on its own mesh
+                    "fvcom": bool(stream.get("fvcom")),
                 },
                 **analysis.describe_variable(model_variable, stream),
             )
@@ -280,13 +290,13 @@ def _years(box, errors, known):
 
 def default_climatology(placed, years_of):
     """A layered pop-out's boxes (the climatology's, and the time series'), as
-    they start: each variable ticked (the user's rule: one is left out by
-    unticking it), but no layer, no years and no way to take the water column.
+    they start: nothing ticked (the user's rule, 2026-10-31: the user ticks
+    the variables to analyse), no layer, no years and no way to take the water column.
     Nothing else is chosen for the user: the years of each variable's output
     are only shown beside it (see output_years)."""
     return {
         "rows": {
-            row["name"]: {"use": True, "start": "", "end": "", "surface": False, "bottom": False, "water_column": False, "how": "",
+            row["name"]: {"use": False, "start": "", "end": "", "surface": False, "bottom": False, "water_column": False, "how": "",
                 # the long-term series' rolling mean, none to start with, and how it is shown
                 "window": "1", "show": analysis.SHOW_ABSOLUTE,
             }
@@ -297,11 +307,11 @@ def default_climatology(placed, years_of):
 
 
 def default_phenology(placed, years_of, time_res_of):
-    """The phenology pop-out's boxes, as they start: each variable with daily
-    output ticked (one without cannot have a phenology), and no years."""
+    """The phenology pop-out's boxes, as they start: nothing ticked (a variable
+    without daily output cannot have a phenology), and no years."""
     return {
         "rows": {
-            row["name"]: {"use": time_res_of(row["name"]) == time_resolution.DAILY, "start": "", "end": ""} for row in placed
+            row["name"]: {"use": False, "start": "", "end": ""} for row in placed
         }
     }
 
@@ -475,13 +485,13 @@ CHANGE_BOXES = tuple(f"{period}_{end}" for period in CHANGE_PERIODS for end in (
 
 
 def default_map_changes(placed):
-    """The map changes pop-out's boxes, as they start: each variable ticked,
-    but no layer, no years, no plot and no change."""
+    """The map changes pop-out's boxes, as they start: nothing ticked,
+    no layer, no years, no plot and no change."""
     blank = {box: "" for box in CHANGE_BOXES}
     return {
         "rows": {
             row["name"]: dict(
-                blank, use=True, plot="", change="", surface=False, bottom=False, water_column=False, how=""
+                blank, use=False, plot="", change="", surface=False, bottom=False, water_column=False, how=""
             )
             for row in placed
         },
@@ -595,8 +605,8 @@ def blank_transect():
 
 def default_transects(placed):
     """The transects pop-out's boxes, as they start: for each variable on its
-    own, ticked, with one transect with nothing in it."""
-    return {"rows": {row["name"]: {"use": True, "transects": [blank_transect()]} for row in placed}, "thickness": ""}
+    own, unticked, with one transect with nothing in it."""
+    return {"rows": {row["name"]: {"use": False, "transects": [blank_transect()]} for row in placed}, "thickness": ""}
 
 
 def _blank(line):
@@ -876,9 +886,8 @@ FIGURE_CODE_CHOICES = {"yes": True, "no": False}
 
 def check_figure_code(choice):
     """The answer to whether the report should have code to reproduce its
-    figures, "yes" or "no": (figure_code, error). It must be answered, so
-    no answer is an error."""
-    choice = str(choice or "").strip().lower()
+    figures, "yes" or "no": (figure_code, error). Not answering is "no"."""
+    choice = str(choice or "").strip().lower() or "no"
     if choice not in FIGURE_CODE_CHOICES:
         return None, "Say whether the report should have code to reproduce its figures."
     return FIGURE_CODE_CHOICES[choice], None

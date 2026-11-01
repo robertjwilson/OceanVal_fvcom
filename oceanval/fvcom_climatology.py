@@ -593,6 +593,34 @@ def daily_climatology(files, parts, years, time_shift=None, as_missing=None, cor
     return days, np.hstack(pieces)
 
 
+def mesh_arrays(path):
+    """The mesh of the FVCOM file at path as numpy arrays, {name: values} for
+    the MESH variables it has: only these are read, never a variable of the
+    model's values. The caller holds oceanval.netcdf_lock.LOCK in a thread of
+    the window."""
+    import netCDF4
+
+    with netCDF4.Dataset(path) as handle:
+        return {name: np.asarray(handle.variables[name][:]) for name in MESH if name in handle.variables}
+
+
+def same_mesh(first, second):
+    """Whether two meshes (from mesh_arrays) are the same: the same cells (nv)
+    in the same places."""
+    if set(first) != set(second):
+        return False
+    for name in first:
+        a, b = first[name], second[name]
+        if a.shape != b.shape:
+            return False
+        if name == "nv":
+            if not np.array_equal(a, b):
+                return False
+        elif not np.allclose(a, b, rtol=0, atol=1e-6, equal_nan=True):
+            return False
+    return True
+
+
 def _mesh(path):
     """The variables of the mesh of the FVCOM file at path, as xarray
     variables, and the calendar of its times."""

@@ -12,26 +12,28 @@ import pytest
 import xarray as xr
 
 import oceanval
-from oceanval import analysis_report, sim_compare
-from conftest import no_book
-from simulations import write_analysis_simulation
+from oceanval import sim_compare
+from conftest import quietly, same_as_analyze
+from simulations import (
+    B_LATS,
+    B_LONS,
+    COMPARE_CLIMATOLOGY as CLIMATOLOGY,
+    COMPARE_LONG_TERM,
+    COMPARE_TRANSECT,
+    COMPARE_YEARS as YEARS,
+    EVERY_OPTION,
+    TREND_A,
+    TREND_B,
+    write_analysis_simulation,
+)
 
-YEARS = (2012, 2013, 2014)
 # surface temperature is 10 plus the month, plus the trend for each year after the first
-TREND_A, TREND_B = 1.0, 3.0
-B_LATS = list(np.arange(49.5, 53.6, 0.5))
-B_LONS = list(np.arange(-4.5, 0.6, 0.5))
-CLIMATOLOGY = {"Temperature": {"start": 2012, "end": 2014, "surface": True}}
 
 
 @pytest.fixture(scope="module")
-def sims(tmp_path_factory):
+def sims(compared_monthly):
     """Two simulations: A on the usual grid and B on a finer one, which rises faster."""
-    base = tmp_path_factory.mktemp("compare")
-    a, b = base / "a", base / "b"
-    write_analysis_simulation(str(a), years=YEARS, daily=False, trend=TREND_A)
-    write_analysis_simulation(str(b), years=YEARS, daily=False, trend=TREND_B, lats=B_LATS, lons=B_LONS)
-    return str(a), str(b)
+    return compared_monthly
 
 
 def transects_available():
@@ -560,21 +562,22 @@ class TestCores:
 
 def compare_quietly(arguments):
     """compare_simulations(**arguments) with no report built: its info."""
-    built = []
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(analysis_report, "InterimBook", no_book(built))
-        oceanval.compare_simulations(**arguments)
-    return built[0]
+    return quietly(oceanval.compare_simulations, **arguments)
 
 
 @pytest.fixture(scope="module")
 def out(sims, tmp_path_factory):
     out = tmp_path_factory.mktemp("own")
-    long_term = {"Temperature": {"start": 2012, "end": 2014, "surface": True}}
-    return out, compare_quietly(given(sims, long_term=long_term, out_dir=str(out)))
+    return out, compare_quietly(given(sims, long_term=COMPARE_LONG_TERM, out_dir=str(out)))
 
 
 class TestEachSimulationOnItsOwn:
+
+    def test_warm_run_is_what_analyze_gives(self, out, analysed_monthly_b):
+        """With nothing unified, masked or converted, a simulation's results are
+        those of analyze() of it alone (tests/test_analysis.py's)."""
+        folder, _ = out
+        same_as_analyze(os.path.join(results(folder), "warm_run"), analysed_monthly_b[0])
 
     def test_there_is_a_folder_for_each(self, out):
         folder, _ = out
@@ -864,38 +867,27 @@ class TestEveryOption:
 
     @pytest.fixture(scope="class")
     @classmethod
-    def daily(cls, tmp_path_factory):
-        base = tmp_path_factory.mktemp("daily")
-        a, b = base / "a", base / "b"
-        write_analysis_simulation(str(a), years=YEARS, daily=True, trend=TREND_A)
-        write_analysis_simulation(str(b), years=YEARS, daily=True, trend=TREND_B, lats=B_LATS, lons=B_LONS)
-        return str(a), str(b)
+    def daily(cls, compared_daily):
+        return compared_daily
 
-    OPTIONS = dict(
-        variables={"Temperature": "thetao", "Chlorophyll": "P1_Chl+P2_Chl"},
-        climatology={"Temperature": {"start": 2012, "end": 2014, "surface": True, "bottom": True, "water_column": "mean"}},
-        phenology={"Chlorophyll": {"start": 2012, "end": 2014}},
-        long_term={"Temperature": {"start": 2012, "end": 2014, "surface": True}},
-        seasonal={"Temperature": {"start": 2012, "end": 2014, "surface": True}},
-        map_changes={
-            "Temperature": {
-                "historical": {"start": 2012, "end": 2012},
-                "future": [{"start": 2014, "end": 2014}],
-                "plot": "absolute_changes",
-                "change": "absolute",
-                "surface": True,
-            }
-        },
-        thickness="e3t",
-        stations={"Station": [-2.0, 51.5]},
-    )
+    OPTIONS = EVERY_OPTION
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def as_they_are(cls, compared_daily, tmp_path_factory):
+        """The comparison with every option and nothing unified: (its folder, its info)."""
+        out = tmp_path_factory.mktemp("every_option")
+        return out, compare_quietly(given(compared_daily, out_dir=str(out), **cls.OPTIONS))
 
     @pytest.mark.parametrize("unify", [None, {"baseline": "Base run"}, {"lon": [-4, 0], "lat": [50, 53], "res": 1}])
-    def test_each_simulation_has_each_result(self, daily, tmp_path, unify):
-        info = compare_quietly(given(daily, unify=unify, out_dir=str(tmp_path), **self.OPTIONS))
+    def test_each_simulation_has_each_result(self, daily, tmp_path, unify, request):
+        if unify is None:
+            out, info = request.getfixturevalue("as_they_are")
+        else:
+            out, info = tmp_path, compare_quietly(given(daily, unify=unify, out_dir=str(tmp_path), **self.OPTIONS))
         assert [v["key"] for v in info["variables"]] == ["temperature", "chlorophyll"]
         for key in ("base_run", "warm_run"):
-            files = set(os.listdir(os.path.join(results(tmp_path), key)))
+            files = set(os.listdir(os.path.join(results(out), key)))
             assert {
                 "temperature_surface_monthly.nc",
                 "temperature_bottom_annual.nc",
@@ -908,6 +900,12 @@ class TestEveryOption:
                 "temperature_surface_seasonal.csv",
             } <= files
 
+    def test_base_run_is_what_analyze_gives(self, as_they_are, analysed_daily_a):
+        """With nothing unified, masked or converted, a simulation's results are
+        those of analyze() of it alone (tests/test_analysis.py's)."""
+        out, _ = as_they_are
+        same_as_analyze(os.path.join(results(out), "base_run"), analysed_daily_a[0])
+
     def test_the_phenology_is_of_the_same_cells(self, daily, tmp_path):
         compare_quietly(given(daily, unify={"baseline": "Base run"}, out_dir=str(tmp_path), **self.OPTIONS))
         with xr.open_dataset(os.path.join(results(tmp_path), "base_run", "chlorophyll_phenology.nc")) as a, xr.open_dataset(
@@ -918,18 +916,11 @@ class TestEveryOption:
             # A peaks about 60 + 30 for each row north (a day out for the leap year); B has its own rows
             assert a["peak_day"].values[:, 0] == pytest.approx([60, 90, 120, 150], abs=1.5)
 
-    def test_transects_of_both_on_the_common_grid(self, daily, tmp_path):
+    def test_transects_of_both_on_the_common_grid(self, daily, tmp_path, request):
         from oceanval import transects
 
         if not transects.available():
             pytest.skip("needs nctoolkit 1.3.6 or later")
-        line = {
-            "start": [-2.0, 50.0],
-            "end": [-2.0, 53.0],
-            "climatology": {"start": 2012, "end": 2014},
-            "vertical": {"start": 2012, "end": 2014},
-            "trends": {"start": 2012, "end": 2014, "how": "absolute"},
-        }
         for unify in (None, {"baseline": "Base run"}):
             out = tmp_path / ("none" if unify is None else "baseline")
             info = compare_quietly(
@@ -938,7 +929,7 @@ class TestEveryOption:
                     unify=unify,
                     variables={"Temperature": "thetao"},
                     climatology=None,
-                    transects={"Temperature": [line]},
+                    transects={"Temperature": [COMPARE_TRANSECT]},
                     thickness="e3t",
                     out_dir=str(out),
                 )
@@ -954,6 +945,8 @@ class TestEveryOption:
             if unify is None:
                 # each is sampled as its own grid has it
                 assert steps["Base run"] != steps["Warm run"]
+                # and the Warm run's are those of analyze() of it alone (tests/test_analysis.py's)
+                same_as_analyze(os.path.join(results(out), "warm_run"), request.getfixturevalue("analysed_transects_b")[0])
             else:
                 # on one grid, every simulation has the same points
                 assert len(set(steps.values())) == 1
@@ -964,12 +957,8 @@ class TestDomainMask:
 
     @pytest.fixture(scope="class")
     @classmethod
-    def daily(cls, tmp_path_factory):
-        base = tmp_path_factory.mktemp("daily_mask")
-        a, b = base / "a", base / "b"
-        write_analysis_simulation(str(a), years=YEARS, daily=True, trend=TREND_A)
-        write_analysis_simulation(str(b), years=YEARS, daily=True, trend=TREND_B, lats=B_LATS, lons=B_LONS)
-        return str(a), str(b)
+    def daily(cls, compared_daily):
+        return compared_daily
 
     @staticmethod
     def write_mask(path, west=-2.0, name="wanted"):

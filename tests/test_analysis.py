@@ -12,6 +12,7 @@ import shutil
 
 import cftime
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 
@@ -20,6 +21,10 @@ from oceanval import analysis, analysis_forms, surface
 from simulations import (
     ANALYSIS_LEVEL_VALUES,
     ANALYSIS_THICKNESS,
+    B_LATS,
+    B_LONS,
+    TREND_A,
+    TREND_B,
     analysis_peak_day,
     write_analysis_simulation,
     write_month_files,
@@ -896,6 +901,63 @@ def test_the_report_with_transects(tmp_path):
     assert sorted(set(int(n) for n in re.findall(r"Figure (\d+)</strong>", page))) == [1, 2, 3, 4, 5, 6]
     assert "Transects" in overview and "to_transect" in overview
     assert "oceanval-copy-code" not in page
+
+
+class TestTheSimulationsOfAComparison:
+    """analyze() of one of the simulations tests/test_sim_compare.py compares,
+    with the comparison's options (the analysed_* fixtures of conftest.py,
+    run once a session): what it gives, which the comparison must give that
+    simulation too. thetao is its level's value plus the month, plus the
+    simulation's trend for each year after 2012."""
+
+    def test_the_monthly_climatology_and_long_term_series_of_b(self, analysed_monthly_b):
+        found, info = analysed_monthly_b
+        assert [v["key"] for v in info["variables"]] == ["temperature"]
+        annual = values(os.path.join(found, "temperature_surface_annual.nc"), "temperature")
+        # 10 + the mean of the months (6.5) + the trend over 2012-2014 (mean of 0, 1, 2 years)
+        assert annual.shape[-1] == len(B_LATS) * len(B_LONS)
+        assert np.allclose(annual, 10 + 6.5 + TREND_B, atol=1e-4)
+        frame = pd.read_csv(os.path.join(found, "temperature_surface_long_term.csv"))
+        domain = frame[frame.name == "Full Domain"].groupby("year").value.mean()
+        assert domain.loc[2012] == pytest.approx(10 + 6.5, abs=1e-4)
+        assert domain.loc[2014] == pytest.approx(10 + 6.5 + 2 * TREND_B, abs=1e-4)
+
+    def test_every_option_of_a(self, analysed_daily_a):
+        found, info = analysed_daily_a
+        assert [v["key"] for v in info["variables"]] == ["temperature", "chlorophyll"]
+        assert {
+            "temperature_surface_monthly.nc",
+            "chlorophyll_surface_daily.nc",
+            "temperature_surface_change1.nc",
+            "temperature_surface_seasonal.csv",
+        } <= set(os.listdir(found))
+
+        def annual(layer):
+            return values(os.path.join(found, f"temperature_{layer}_annual.nc"), "temperature")
+
+        # each month's days are its number, and the mean year is a year after the first
+        assert np.allclose(annual("surface"), ANALYSIS_LEVEL_VALUES[0] + 6.5 + TREND_A, atol=1e-4)
+        assert np.allclose(annual("bottom"), ANALYSIS_LEVEL_VALUES[-1] + 6.5 + TREND_A, atol=1e-4)
+        column = np.average(ANALYSIS_LEVEL_VALUES, weights=ANALYSIS_THICKNESS)
+        assert np.allclose(annual("mean"), column + 6.5 + TREND_A, atol=1e-4)
+        change = values(os.path.join(found, "temperature_surface_change1.nc"), "temperature")
+        assert np.allclose(change, 2 * TREND_A, atol=1e-4)
+        with xr.open_dataset(os.path.join(found, "chlorophyll_phenology.nc")) as ds:
+            days = ds[analysis.PEAK_DAY].values
+        # a day out in places for the leap year
+        assert days[:, 0] == pytest.approx([analysis_peak_day(row) for row in range(days.shape[0])], abs=1.5)
+        stations = pd.read_csv(os.path.join(found, "temperature_surface_long_term.csv"))
+        assert "Station" in set(stations.name)
+
+    def test_a_transect_of_every_kind_of_b(self, analysed_transects_b):
+        found, info = analysed_transects_b
+        options = info["variables"][0]["transects"]["lines"][0]["options"]
+        assert set(options) == {"climatology", "vertical", "trends"}
+        frames = {name: pd.read_csv(os.path.join(found, option["csv"])) for name, option in options.items()}
+        for month, value in zip(frames["climatology"].month, frames["climatology"].value):
+            assert value == pytest.approx(ANALYSIS_LEVEL_VALUES[0] + month + TREND_B, abs=1e-4)
+        for _, part in frames["trends"].groupby("position"):
+            assert part.sort_values("year").value.diff().dropna().to_numpy() == pytest.approx(TREND_B)
 
 
 class TestForms:

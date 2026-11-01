@@ -524,6 +524,10 @@ case) and every report kernel inheriting it could die in a `%%R` figure (SIGBUS 
   CSV schemas, and an `analysis.json` of its own, so `analysis_plots` can still draw one simulation at a time
   (`monthly_maps(limits=)` and `change_maps(also=)` take the scale all the simulations share). `comparison.json` says
   what is where, and each simulation's colour (`sim_compare.COLOURS`, Okabe-Ito, in the order of the simulations).
+  **With nothing unified, masked or converted, a simulation's results are exactly `analyze()`'s of it alone**: the
+  session fixtures `compared_monthly`/`compared_daily` and `analysed_*` in `tests/conftest.py` are run once a session,
+  checked as analyze tests in `tests/test_analysis.py` (`TestTheSimulationsOfAComparison`), and `tests/test_sim_compare.py`
+  compares one simulation of its comparisons with them (`conftest.same_as_analyze`: the same files, each identical).
 - Combined figures are `oceanval/sim_plots.py`, with the same contract as Analyze's: each is drawn by its own script
   (colours and files as literals), `tests/test_sim_plots.py` redraws each in a fresh process and compares pixels. Maps are
   a panel for each simulation on **one colour scale**; series are lines coloured by simulation, **a panel for each

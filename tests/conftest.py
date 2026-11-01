@@ -36,6 +36,134 @@ def no_book(built):
     return NoBook
 
 
+def quietly(run, **arguments):
+    """run(**arguments), analyze() or compare_simulations(), with no report
+    and no check of the files by `cdo sinfo`: the info the run saved."""
+    from oceanval import analysis_report, cdo_check
+
+    built = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(analysis_report, "InterimBook", no_book(built))
+        patch.setattr(cdo_check, "ENABLED", False)
+        run(**arguments)
+    return built[0]
+
+
+# The simulations compare_simulations() is tested with, and analyze() of one
+# of them alone with the same options as a comparison of them: each is run
+# once in a session, by the test of analyze() (tests/test_analysis.py) that
+# checks it, and tests/test_sim_compare.py then checks that the simulation's
+# results in the comparison are the same (same_as_analyze).
+
+
+def _compared(tmp_path_factory, name, daily):
+    from simulations import B_LATS, B_LONS, COMPARE_YEARS, TREND_A, TREND_B, write_analysis_simulation
+
+    base = tmp_path_factory.mktemp(name)
+    a, b = base / "a", base / "b"
+    write_analysis_simulation(str(a), years=COMPARE_YEARS, daily=daily, trend=TREND_A)
+    write_analysis_simulation(str(b), years=COMPARE_YEARS, daily=daily, trend=TREND_B, lats=B_LATS, lons=B_LONS)
+    return str(a), str(b)
+
+
+@pytest.fixture(scope="session")
+def compared_monthly(tmp_path_factory):
+    """Two monthly simulations: A on the analysis grid and B on a finer one, which rises faster."""
+    return _compared(tmp_path_factory, "compared_monthly", daily=False)
+
+
+@pytest.fixture(scope="session")
+def compared_daily(tmp_path_factory):
+    """compared_monthly's simulations, with daily output."""
+    return _compared(tmp_path_factory, "compared_daily", daily=True)
+
+
+def _analysed(tmp_path_factory, name, sim_dir, **arguments):
+    """analyze() of sim_dir alone: (its results folder, the info it saved)."""
+    import oceanval
+    from oceanval import analysis
+
+    out = tmp_path_factory.mktemp(name)
+    info = quietly(oceanval.analyze, sim_dir=sim_dir, n_dirs_down=1, out_dir=str(out), view=False, cores=1, **arguments)
+    return os.path.join(str(out), analysis.FOLDER, analysis.RESULTS), info
+
+
+@pytest.fixture(scope="session")
+def analysed_monthly_b(compared_monthly, tmp_path_factory):
+    """The monthly B alone, with the climatology and long-term series of
+    test_sim_compare.py's comparison of the monthly simulations."""
+    from simulations import COMPARE_CLIMATOLOGY, COMPARE_LONG_TERM
+
+    return _analysed(
+        tmp_path_factory,
+        "analysed_monthly_b",
+        compared_monthly[1],
+        variables={"Temperature": "thetao"},
+        climatology=COMPARE_CLIMATOLOGY,
+        long_term=COMPARE_LONG_TERM,
+    )
+
+
+@pytest.fixture(scope="session")
+def analysed_daily_a(compared_daily, tmp_path_factory):
+    """The daily A alone, with every option (EVERY_OPTION)."""
+    from simulations import EVERY_OPTION
+
+    return _analysed(tmp_path_factory, "analysed_daily_a", compared_daily[0], **EVERY_OPTION)
+
+
+@pytest.fixture(scope="session")
+def analysed_transects_b(compared_daily, tmp_path_factory):
+    """The daily B alone, with a transect of every kind (COMPARE_TRANSECT)."""
+    from oceanval import transects
+    from simulations import COMPARE_TRANSECT
+
+    if not transects.available():
+        pytest.skip("needs nctoolkit 1.3.6 or later")
+    return _analysed(
+        tmp_path_factory,
+        "analysed_transects_b",
+        compared_daily[1],
+        variables={"Temperature": "thetao"},
+        transects={"Temperature": [COMPARE_TRANSECT]},
+        thickness="e3t",
+    )
+
+
+def same_as_analyze(compared, analysed):
+    """The results of a simulation in a comparison (compared, its folder)
+    are those of analyze() of it alone (analysed, its results folder): the
+    same files, each the same."""
+    import pandas as pd
+    import xarray as xr
+    from oceanval import analysis
+
+    names = sorted(os.listdir(analysed))
+    assert sorted(os.listdir(compared)) == names
+    # the info last, so that a difference in what was worked out is said first
+    for name in sorted(names, key=lambda name: name == analysis.INFO_FILE):
+        ours, theirs = os.path.join(compared, name), os.path.join(analysed, name)
+        if name.endswith(".nc"):
+            with xr.open_dataset(ours) as a, xr.open_dataset(theirs) as b:
+                a, b = a.load(), b.load()
+            # CDO's and nctoolkit's records of what was run name the folders
+            for ds in (a, b):
+                for key in [key for key in ds.attrs if key.lower().startswith("history")]:
+                    del ds.attrs[key]
+            xr.testing.assert_identical(a, b)
+        elif name.endswith(".csv"):
+            pd.testing.assert_frame_equal(pd.read_csv(ours), pd.read_csv(theirs), check_exact=True)
+        elif name == analysis.INFO_FILE:
+            with open(ours) as a, open(theirs) as b:
+                a, b = json.load(a), json.load(b)
+            # when each was run
+            a.pop("created"), b.pop("created")
+            assert a == b, name
+        else:
+            with open(ours, "rb") as a, open(theirs, "rb") as b:
+                assert a.read() == b.read(), name
+
+
 @pytest.fixture
 def no_report(monkeypatch):
     """analyze() and compare_simulations() without their report: the info

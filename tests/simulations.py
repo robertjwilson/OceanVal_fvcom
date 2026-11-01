@@ -92,6 +92,46 @@ ANALYSIS_THICKNESS = [1.0, 2.0, 7.0]
 ANALYSIS_LEVEL_VALUES = [10.0, 8.0, 4.0]
 
 
+# the two simulations compare_simulations() is tested with (the compared_*
+# fixtures of conftest.py), and that analyze() is run on alone to check that
+# each simulation of a comparison gets what analyze() gives it: A on the
+# analysis grid, and B on a finer one, which rises faster
+COMPARE_YEARS = (2012, 2013, 2014)
+TREND_A, TREND_B = 1.0, 3.0
+B_LATS = list(np.arange(49.5, 53.6, 0.5))
+B_LONS = list(np.arange(-4.5, 0.6, 0.5))
+# what the monthly simulations are compared by
+COMPARE_CLIMATOLOGY = {"Temperature": {"start": 2012, "end": 2014, "surface": True}}
+COMPARE_LONG_TERM = {"Temperature": {"start": 2012, "end": 2014, "surface": True}}
+# everything analyze() does, for the daily simulations
+EVERY_OPTION = dict(
+    variables={"Temperature": "thetao", "Chlorophyll": "P1_Chl+P2_Chl"},
+    climatology={"Temperature": {"start": 2012, "end": 2014, "surface": True, "bottom": True, "water_column": "mean"}},
+    phenology={"Chlorophyll": {"start": 2012, "end": 2014}},
+    long_term={"Temperature": {"start": 2012, "end": 2014, "surface": True}},
+    seasonal={"Temperature": {"start": 2012, "end": 2014, "surface": True}},
+    map_changes={
+        "Temperature": {
+            "historical": {"start": 2012, "end": 2012},
+            "future": [{"start": 2014, "end": 2014}],
+            "plot": "absolute_changes",
+            "change": "absolute",
+            "surface": True,
+        }
+    },
+    thickness="e3t",
+    stations={"Station": [-2.0, 51.5]},
+)
+# a transect of every kind across the daily simulations
+COMPARE_TRANSECT = {
+    "start": [-2.0, 50.0],
+    "end": [-2.0, 53.0],
+    "climatology": {"start": 2012, "end": 2014},
+    "vertical": {"start": 2012, "end": 2014},
+    "trends": {"start": 2012, "end": 2014, "how": "absolute"},
+}
+
+
 def analysis_peak_day(row):
     """The day of the year chl peaks on in a row of the analysis grid."""
     return 60 + 30 * row
